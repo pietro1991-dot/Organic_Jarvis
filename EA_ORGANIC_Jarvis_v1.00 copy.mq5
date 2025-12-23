@@ -2668,7 +2668,7 @@ void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 
 //+------------------------------------------------------------------+
 //| 🔧 FIX: Verifica se i periodi sono cambiati significativamente    |
-//| Ritorna true se almeno un periodo è cambiato >23.6% (soglia = 1/φ³)|
+//| Ritorna true se almeno un periodo è cambiato >20% (soglia = 1/φ²)|
 //| In tal caso gli handle indicatori devono essere ricreati          |
 //+------------------------------------------------------------------+
 bool PeriodsChangedSignificantly()
@@ -3950,38 +3950,37 @@ void OnTick()
     // Controlla eventuale stop loss temporale
     CheckAndCloseOnTimeStop();
     
-    // ═══════════════════════════════════════════════════════════════
-    // WARMUP: Verifica se il preload storico è andato a buon fine
-    // Il buffer Hurst viene pre-caricato in OnInit() da PreloadHurstBufferFromHistory()
-    // Qui controlliamo solo che i flag siano pronti, non aspettiamo tempo reale
-    // ═══════════════════════════════════════════════════════════════
+    // 🔧 FIX: Warmup check - aggiorna indicatori ma non tradare durante warmup
+    // Protezione multipla: barre + tempo + tick count per evitare bypass
+    static int warmupTickCount = 0;
     if (!g_warmupComplete) {
-        // Verifica che i buffer siano stati pre-caricati correttamente dallo storico
-        bool hurstBufferReady = (g_hurstHistorySize >= (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ));
-        bool tradeScoreBufferReady = (g_tradeScoreHistorySize >= (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ));
+        warmupTickCount++;
+        int currentBars = Bars(_Symbol, PERIOD_H1);  // Usa H1 come riferimento
+        long secondsRunning = (long)(TimeCurrent() - g_eaStartTime);
         
-        if (hurstBufferReady && tradeScoreBufferReady && g_hurstReady) {
+        // 🔧 FIX: Warmup completo SOLO se tutte le condizioni sono soddisfatte:
+        // 1. Abbastanza barre (dati storici sufficienti)
+        // 2. Almeno 60 secondi (tempo reale, evita burst in backtest)
+        // 3. Almeno 100 tick (garanzia aggiuntiva per backtest veloci)
+        if (currentBars >= g_warmupBarsRequired && secondsRunning >= 60 && warmupTickCount >= 100) {
             g_warmupComplete = true;
-            Print("✅ [WARMUP] Buffer pre-caricati dallo storico - EA pronto per il trading");
+            Print("✅ [WARMUP] Completato - EA pronto per il trading");
         } else {
-            // Preload fallito - tenta ricalcolo incrementale
+            // Durante warmup, aggiorna comunque il sistema ma non tradare
             static datetime lastWarmupLog = 0;
-            if (TimeCurrent() - lastWarmupLog >= 30) {
-                PrintFormat("🔄 [WARMUP] In attesa dati sufficienti: Hurst=%d/%d TradeScore=%d/%d Ready=%s", 
-                    g_hurstHistorySize, (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ),
-                    g_tradeScoreHistorySize, (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ),
-                    g_hurstReady ? "Sì" : "No");
+            if (TimeCurrent() - lastWarmupLog >= 30) {  // Log ogni 30 secondi max
+                PrintFormat("🔄 [WARMUP] In corso: %d/%d barre, %ld sec, %d tick", 
+                    currentBars, g_warmupBarsRequired, secondsRunning, warmupTickCount);
                 lastWarmupLog = TimeCurrent();
             }
             
-            // Aggiorna sistema per raccogliere dati incrementalmente
+            // Aggiorna solo gli indicatori durante warmup
             datetime currentBarTime_warmup = iTime(_Symbol, PERIOD_CURRENT, 0);
-            static datetime lastBarTime_warmup = 0;
-            if (currentBarTime_warmup != lastBarTime_warmup) {
-                lastBarTime_warmup = currentBarTime_warmup;
+            if (currentBarTime_warmup != lastBarTime) {
+                lastBarTime = currentBarTime_warmup;
                 RecalculateOrganicSystem();
             }
-            return;  // Non proseguire con trading finché buffer non pronti
+            return;  // Non proseguire con trading durante warmup
         }
     }
     
@@ -4459,7 +4458,7 @@ int ExecuteVotingLogic()
         if (ArraySize(tfData_M5.ao) > latestIdxM5) {
             aoValue = tfData_M5.ao[latestIdxM5];
         }
-        cAO = enableAO && (aoValue > tfData_M5.ao_center);
+        cAO = enableAO && (aoValue > 0);
         cOBV = false;
         if (enableOBV && ArraySize(tfData_M5.obv) > latestIdxM5 && latestIdxM5 >= 1) {
             cOBV = (tfData_M5.obv[latestIdxM5] >= tfData_M5.obv[latestIdxM5 - 1]);
@@ -4548,8 +4547,8 @@ int ExecuteVotingLogic()
                 ha_close_log, ha_open_log, cHeikin ? "✅ BUY" : "❌ SELL", enableHeikin ? "ATTIVO" : "disattivo");
             PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s (%s)",
                 wprValue, tfData_M5.wpr_center, cWPR ? "✅ BUY" : "❌ SELL", enableWPR ? "ATTIVO" : "disattivo");
-            PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s (%s)",
-                aoValue, tfData_M5.ao_center, cAO ? "✅ BUY" : "❌ SELL", enableAO ? "ATTIVO" : "disattivo");
+            PrintFormat("  AO: %.5f → %s (%s)",
+                aoValue, cAO ? "✅ BUY" : "❌ SELL", enableAO ? "ATTIVO" : "disattivo");
             double obv_curr = (ArraySize(tfData_M5.obv) > latestIdxM5) ? tfData_M5.obv[latestIdxM5] : 0;
             double obv_prev = (ArraySize(tfData_M5.obv) > latestIdxM5 && latestIdxM5 >= 1) ? tfData_M5.obv[latestIdxM5 - 1] : 0;
             PrintFormat("  OBV: %.0f vs Prev=%.0f → %s (%s)",
@@ -4628,9 +4627,8 @@ int ExecuteVotingLogic()
     PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
         h1_wpr, tfData_H1.wpr_center,
         (h1_wpr > tfData_H1.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        h1_ao, tfData_H1.ao_center,
-        (h1_ao > tfData_H1.ao_center) ? "BUY" : "SELL");
+    PrintFormat("  AO: %.5f → %s",
+        h1_ao, (h1_ao > 0) ? "BUY" : "SELL");
     PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
         h1_obv, h1_obv_prev,
         (h1_obv >= h1_obv_prev) ? "BUY" : "SELL");
@@ -4711,9 +4709,8 @@ int ExecuteVotingLogic()
     PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
         h4_wpr, tfData_H4.wpr_center,
         (h4_wpr > tfData_H4.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        h4_ao, tfData_H4.ao_center,
-        (h4_ao > tfData_H4.ao_center) ? "BUY" : "SELL");
+    PrintFormat("  AO: %.5f → %s",
+        h4_ao, (h4_ao > 0) ? "BUY" : "SELL");
     PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
         h4_obv, h4_obv_prev,
         (h4_obv >= h4_obv_prev) ? "BUY" : "SELL");
@@ -4794,9 +4791,8 @@ int ExecuteVotingLogic()
     PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
         d1_wpr, tfData_D1.wpr_center,
         (d1_wpr > tfData_D1.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        d1_ao, tfData_D1.ao_center,
-        (d1_ao > tfData_D1.ao_center) ? "BUY" : "SELL");
+    PrintFormat("  AO: %.5f → %s",
+        d1_ao, (d1_ao > 0) ? "BUY" : "SELL");
     PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
         d1_obv, d1_obv_prev,
         (d1_obv >= d1_obv_prev) ? "BUY" : "SELL");

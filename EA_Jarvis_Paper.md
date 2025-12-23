@@ -263,7 +263,7 @@ Mettiamo insieme tutti i pezzi. Quando arriva una nuova candela, EA Jarvis esegu
 
 ### Step 2: Verifica ready check
 
-L'EA non opera se non ha abbastanza dati storici per calcolare tutti i valori organici. Serve un periodo di "warm-up" all'inizio.
+L'EA verifica che i buffer Hurst e TradeScore siano stati pre-caricati correttamente dallo storico in `OnInit()`. Se il pre-caricamento è riuscito, il trading può iniziare immediatamente. In caso contrario, l'EA accumula dati incrementalmente fino a raggiungere le soglie minime.
 
 ### Step 3: Filtro Hurst
 
@@ -422,7 +422,7 @@ Questa progressione garantisce una copertura uniforme in scala logaritmica, con 
 
 ### Algoritmo
 
-Per ogni scala $n$ in [16, 28, 46, 74, 120]:
+Per ogni scala $n$ in [11, 18, 29, 47, 76]:
 
 1. Dividi la serie in blocchi di $n$ elementi
 2. Per ogni blocco calcola:
@@ -618,7 +618,7 @@ ALTRIMENTI                                →  NO TRADE
 | 9 | PSAR | Price > SAR | Price < SAR |
 | 10 | Heikin Ashi | HA_Close > HA_Open | HA_Close < HA_Open |
 | 11 | Williams %R | WPR > centro_emp | WPR < centro_emp |
-| 12 | Awesome Osc | AO > 0 | AO < 0 |
+| 12 | Awesome Osc | AO > centro_emp | AO < centro_emp |
 | 13 | OBV | OBV↑ | OBV↓ |
 | 14 | MFI | MFI > centro_emp | MFI < centro_emp |
 | 15 | Donchian | Close > Upper_prev | Close < Lower_prev |
