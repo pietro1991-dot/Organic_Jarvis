@@ -378,6 +378,54 @@ double g_tradeScoreSum = 0.0;                                 // Σ(tradeScore)
 double g_tradeScoreSumSq = 0.0;                               // Σ(tradeScore²)
 int    g_tradeScoreOperationCount = 0;                        // 🔧 FIX: Contatore operazioni per ricalcolo periodico anti-drift
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 📊 STATISTICHE TRADING PER ANALISI PROFITTO
+// ═══════════════════════════════════════════════════════════════════════════
+struct TradeStatistics {
+    int totalTrades;           // Trades totali
+    int winTrades;             // Trades vincenti
+    int lossTrades;            // Trades perdenti
+    double totalProfit;        // Profitto totale lordo
+    double totalLoss;          // Perdita totale lorda (valore assoluto)
+    double maxDrawdown;        // Max drawdown in valuta
+    double maxDrawdownPct;     // Max drawdown in %
+    double peakEquity;         // Picco equity per calcolo DD
+    double currentStreak;      // Streak corrente (+win, -loss)
+    int maxWinStreak;          // Max streak vincente
+    int maxLossStreak;         // Max streak perdente
+    double avgWin;             // Media vincita
+    double avgLoss;            // Media perdita
+    double profitFactor;       // Profit Factor
+    double expectancy;         // Expectancy per trade
+    datetime lastTradeTime;    // Ultimo trade
+    double totalSlippage;      // Slippage totale accumulato (punti)
+    int slippageCount;         // Numero trade con slippage misurato
+    double totalCommission;    // Commissioni totali
+    double totalSwap;          // Swap totali
+};
+
+TradeStatistics g_stats;
+
+// Buffer per ultimi N trade (per analisi pattern)
+struct TradeRecord {
+    ulong ticket;
+    datetime openTime;
+    datetime closeTime;
+    ENUM_POSITION_TYPE type;
+    double openPrice;
+    double closePrice;
+    double volume;
+    double profit;
+    double slippage;
+    double spreadAtOpen;
+    string closeReason;        // "SL", "TP", "TIME_STOP", "SIGNAL"
+};
+
+TradeRecord g_recentTrades[];
+int g_recentTradesMax = 0;     // Calcolato in OnInit come round(φ⁸) ≈ 47
+int g_recentTradesCount = 0;
+int g_recentTradesIndex = 0;
+
 // Stato corrente del regime Hurst (aggiornato periodicamente)
 enum ENUM_HURST_REGIME {
     HURST_TRENDING = 1,      // H > zona random: trend persistence
@@ -767,7 +815,22 @@ int OnInit()
     PrintFormat("[INIT] 🔄 Warmup: %d barre richieste prima del trading", g_warmupBarsRequired);
     
     // ═══════════════════════════════════════════════════════════════
-    // 🚀 RIEPILOGO STATO BUFFER - Trading pronto?
+    // � INIZIALIZZA STATISTICHE TRADING
+    // ═══════════════════════════════════════════════════════════════
+    ZeroMemory(g_stats);
+    g_stats.peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    
+    // Buffer trade recenti = φ⁸ ≈ 47
+    g_recentTradesMax = (int)MathRound(MathPow(PHI, 8));
+    ArrayResize(g_recentTrades, g_recentTradesMax);
+    g_recentTradesCount = 0;
+    g_recentTradesIndex = 0;
+    
+    PrintFormat("[INIT] 📊 Statistiche trading inizializzate | Buffer ultimi %d trade | Equity iniziale: %.2f", 
+        g_recentTradesMax, g_stats.peakEquity);
+    
+    // ═══════════════════════════════════════════════════════════════
+    // �🚀 RIEPILOGO STATO BUFFER - Trading pronto?
     // ═══════════════════════════════════════════════════════════════
     Print("");
     Print("═══════════════════════════════════════════════════════════════");
@@ -2750,6 +2813,54 @@ void OnDeinit(const int reason)
 {
     if (g_enableLogsEffective) {
         PrintFormat("[DEINIT] 🛑 EA Deinit avviato - Motivo: %d (%s)", reason, GetDeinitReasonText(reason));
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 REPORT FINALE STATISTICHE TRADING
+    // ═══════════════════════════════════════════════════════════════
+    if (g_stats.totalTrades > 0) {
+        double netProfit = g_stats.totalProfit - g_stats.totalLoss;
+        double winRate = 100.0 * g_stats.winTrades / g_stats.totalTrades;
+        double avgSlippage = (g_stats.slippageCount > 0) ? g_stats.totalSlippage / g_stats.slippageCount : 0;
+        
+        Print("");
+        Print("╔═══════════════════════════════════════════════════════════════════════════╗");
+        Print("║                    📊 REPORT FINALE SESSIONE                               ║");
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ Simbolo: %s | Magic: %d", _Symbol, g_uniqueMagicNumber);
+        PrintFormat("║ Periodo: %s → %s", 
+            TimeToString(g_eaStartTime, TIME_DATE|TIME_MINUTES),
+            TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES));
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ TRADES: %d totali | Win: %d (%.1f%%) | Loss: %d (%.1f%%)",
+            g_stats.totalTrades,
+            g_stats.winTrades, winRate,
+            g_stats.lossTrades, 100.0 - winRate);
+        PrintFormat("║ PROFITTO LORDO: +%.2f | PERDITA LORDA: -%.2f",
+            g_stats.totalProfit, g_stats.totalLoss);
+        PrintFormat("║ 💰 PROFITTO NETTO: %+.2f %s",
+            netProfit, AccountInfoString(ACCOUNT_CURRENCY));
+        PrintFormat("║ COMMISSIONI: %.2f | SWAP: %.2f",
+            g_stats.totalCommission, g_stats.totalSwap);
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ PROFIT FACTOR: %.2f", g_stats.profitFactor);
+        PrintFormat("║ EXPECTANCY: %.2f per trade", g_stats.expectancy);
+        PrintFormat("║ AVG WIN: %.2f | AVG LOSS: %.2f | Ratio: %.2f",
+            g_stats.avgWin, g_stats.avgLoss,
+            g_stats.avgLoss > 0 ? g_stats.avgWin / g_stats.avgLoss : 0);
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ MAX DRAWDOWN: %.2f (%.2f%%)",
+            g_stats.maxDrawdown, g_stats.maxDrawdownPct);
+        PrintFormat("║ MAX WIN STREAK: %d | MAX LOSS STREAK: %d",
+            g_stats.maxWinStreak, g_stats.maxLossStreak);
+        if (g_stats.slippageCount > 0) {
+            PrintFormat("║ AVG SLIPPAGE: %.2f pts su %d trade",
+                avgSlippage, g_stats.slippageCount);
+        }
+        Print("╚═══════════════════════════════════════════════════════════════════════════╝");
+        Print("");
+    } else {
+        Print("[DEINIT] 📊 Nessun trade eseguito in questa sessione");
     }
     
     EventKillTimer();
@@ -4939,25 +5050,21 @@ int ExecuteVotingLogic()
     
     if (isBuy && scorePct >= currentThreshold) {
         decision = 1;
-        if (g_enableLogsEffective) PrintFormat("[VOTE] ✅ BUY: Score %.1f%% >= %.1f%% soglia", scorePct, currentThreshold);
     }
     else if (isSell && scorePct >= currentThreshold) {
         decision = -1;
-        if (g_enableLogsEffective) PrintFormat("[VOTE] ✅ SELL: Score %.1f%% >= %.1f%% soglia", scorePct, currentThreshold);
-    }
-    else {
-        if (g_enableLogsEffective) PrintFormat("[VOTE] ❌ Nessun trade: Score %.1f%% < %.1f%% soglia", scorePct, currentThreshold);
     }
     
-    // Se decision è 0, esci
-    if (decision == 0) {
-        if (g_enableLogsEffective) PrintFormat("[VOTE] ⚪ NO TRADE - Score %.1f%% | Soglia: %.1f%%", scorePct, currentThreshold);
-        return 0;
+    // Log decisione finale (un solo log, non duplicati)
+    if (decision != 0) {
+        string decisionText = (decision == 1) ? "🟢 BUY" : "🔴 SELL";
+        PrintFormat("[VOTE] ✅ %s APPROVATO | Score: %.1f%% >= %.1f%% soglia", decisionText, scorePct, currentThreshold);
+    } else {
+        if (g_enableLogsEffective) {
+            PrintFormat("[VOTE] ⚪ NO TRADE | Score: %.1f%% < %.1f%% soglia | Dir: %s", 
+                scorePct, currentThreshold, isBuy ? "BUY" : isSell ? "SELL" : "NEUTRA");
+        }
     }
-    
-    // Log decisione finale
-    string decisionText = (decision == 1) ? "🟢 BUY" : "🔴 SELL";
-    PrintFormat("[VOTE] ✅ TRADE APPROVATO: %s | Score: %.1f%% (soglia: %.1f%%)", decisionText, scorePct, currentThreshold);
     
     return decision;
 }
@@ -4999,7 +5106,12 @@ void OpenSellOrder()
         return;
     }
     
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    // 📊 CATTURA DATI PRE-TRADE per analisi
+    double askBefore = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bidBefore = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double spreadBefore = (askBefore - bidBefore) / _Point;
+    
+    double price = bidBefore;
     double sl = 0;
     double tp = 0;
 
@@ -5016,7 +5128,34 @@ void OpenSellOrder()
         tp = price - SellTakeProfitPoints * _Point;
     
     if (trade.Sell(finalLot, _Symbol, price, sl, tp, "Auto SELL")) {
-        PrintFormat("[TRADE] ✅ SELL opened at %.5f, Lot=%.2f, SL=%.5f, TP=%.5f", price, finalLot, sl, tp);
+        // 📊 CALCOLA SLIPPAGE
+        double executedPrice = trade.ResultPrice();
+        double slippagePoints = (bidBefore - executedPrice) / _Point;
+        
+        // Aggiorna statistiche
+        g_stats.totalSlippage += MathAbs(slippagePoints);
+        g_stats.slippageCount++;
+        
+        // Aggiorna equity peak per drawdown
+        double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+        if (currentEquity > g_stats.peakEquity) {
+            g_stats.peakEquity = currentEquity;
+        }
+        g_stats.lastTradeTime = TimeCurrent();
+        
+        // 📊 LOG COMPLETO per analisi profitto
+        PrintFormat("[TRADE] ✅ SELL APERTO #%I64u", trade.ResultOrder());
+        PrintFormat("   📈 Prezzo: richiesto=%.5f eseguito=%.5f | Slippage=%.1f pts", 
+            bidBefore, executedPrice, slippagePoints);
+        PrintFormat("   📊 Spread=%.1f pts | Lot=%.2f | SL=%.5f | TP=%.5f", 
+            spreadBefore, finalLot, sl, tp);
+        if (sl > 0 || tp > 0) {
+            double riskPips = sl > 0 ? (sl - price) / _Point / 10 : 0;
+            double rewardPips = tp > 0 ? (price - tp) / _Point / 10 : 0;
+            double rr = (riskPips > 0 && rewardPips > 0) ? rewardPips / riskPips : 0;
+            PrintFormat("   💰 Risk (SL): %.2f pips | Reward (TP): %.2f pips | R:R=1:%.2f",
+                riskPips, rewardPips, rr);
+        }
     } else {
         int errCode = GetLastError();
         PrintFormat("[TRADE] ❌ SELL FALLITO! Errore %d: %s | Price=%.5f Lot=%.2f SL=%.5f TP=%.5f",
@@ -5061,7 +5200,12 @@ void OpenBuyOrder()
         return;
     }
     
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    // 📊 CATTURA DATI PRE-TRADE per analisi
+    double askBefore = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bidBefore = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double spreadBefore = (askBefore - bidBefore) / _Point;
+    
+    double price = askBefore;
     double sl = 0;
     double tp = 0;
 
@@ -5078,11 +5222,38 @@ void OpenBuyOrder()
         tp = price + BuyTakeProfitPoints * _Point;
     
     if (trade.Buy(finalLot, _Symbol, price, sl, tp, "Auto BUY")) {
-        PrintFormat("[TRADE] ✅ BUY opened at %.5f, Lot=%.2f, SL=%.5f, TP=%.5f", price, finalLot, sl, tp);
+        // 📊 CALCOLA SLIPPAGE
+        double executedPrice = trade.ResultPrice();
+        double slippagePoints = (executedPrice - askBefore) / _Point;
+        
+        // Aggiorna statistiche
+        g_stats.totalSlippage += MathAbs(slippagePoints);
+        g_stats.slippageCount++;
+        
+        // Aggiorna equity peak per drawdown
+        double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+        if (currentEquity > g_stats.peakEquity) {
+            g_stats.peakEquity = currentEquity;
+        }
+        g_stats.lastTradeTime = TimeCurrent();
+        
+        // 📊 LOG COMPLETO per analisi profitto
+        PrintFormat("[TRADE] ✅ BUY APERTO #%I64u", trade.ResultOrder());
+        PrintFormat("   📈 Prezzo: richiesto=%.5f eseguito=%.5f | Slippage=%.1f pts", 
+            askBefore, executedPrice, slippagePoints);
+        PrintFormat("   📊 Spread=%.1f pts | Lot=%.2f | SL=%.5f | TP=%.5f", 
+            spreadBefore, finalLot, sl, tp);
+        if (sl > 0 || tp > 0) {
+            double riskPips = sl > 0 ? (price - sl) / _Point / 10 : 0;
+            double rewardPips = tp > 0 ? (tp - price) / _Point / 10 : 0;
+            double rr = (riskPips > 0 && rewardPips > 0) ? rewardPips / riskPips : 0;
+            PrintFormat("   💰 Risk (SL): %.2f pips | Reward (TP): %.2f pips | R:R=1:%.2f",
+                riskPips, rewardPips, rr);
+        }
     } else {
         int errCode = GetLastError();
-        PrintFormat("[TRADE] ❌ BUY FALLITO! Errore %d: %s | Price=%.5f Lot=%.2f SL=%.5f TP=%.5f",
-            errCode, ErrorDescription(errCode), price, finalLot, sl, tp);
+        PrintFormat("[TRADE] ❌ BUY FALLITO! Errore %d: %s | Price=%.5f Lot=%.2f SL=%.5f TP=%.5f Spread=%.1f",
+            errCode, ErrorDescription(errCode), price, finalLot, sl, tp, spreadBefore);
     }
 }
 
@@ -5221,5 +5392,189 @@ string ErrorDescription(int errorCode)
         case 10044: return "Request rejected, only position close allowed";
         case 10045: return "Request rejected due to FIFO rule";
         default:    return StringFormat("Unknown error %d", errorCode);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 📊 TRACCIA CHIUSURA TRADE E AGGIORNA STATISTICHE                 |
+//| Chiamata automaticamente da MT5 per catturare ogni chiusura       |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+    // Ci interessa solo la chiusura di posizioni (DEAL)
+    if (trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+    
+    // Verifica che sia una chiusura (DEAL_ENTRY_OUT)
+    if (!HistoryDealSelect(trans.deal)) return;
+    
+    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+    if (entry != DEAL_ENTRY_OUT) return;
+    
+    // Verifica Magic Number
+    long dealMagic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+    if (dealMagic != g_uniqueMagicNumber) return;
+    
+    // Verifica simbolo
+    string dealSymbol = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
+    if (dealSymbol != _Symbol) return;
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 ESTRAI DATI DEL TRADE CHIUSO
+    // ═══════════════════════════════════════════════════════════════
+    double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+    double commission = HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+    double swap = HistoryDealGetDouble(trans.deal, DEAL_SWAP);
+    double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+    double closePrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+    ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+    ulong positionId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+    
+    // Profitto netto (inclusi commission e swap)
+    double netProfit = profit + commission + swap;
+    
+    // Aggiorna totali commission/swap
+    g_stats.totalCommission += commission;
+    g_stats.totalSwap += swap;
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 TROVA IL DEAL DI APERTURA per calcolare durata e prezzo entry
+    // ═══════════════════════════════════════════════════════════════
+    double openPrice = 0;
+    datetime openTime = 0;
+    datetime closeTime = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+    
+    // Cerca nella history il deal di apertura con stesso position ID
+    HistorySelectByPosition(positionId);
+    int totalDeals = HistoryDealsTotal();
+    for (int i = 0; i < totalDeals; i++) {
+        ulong dealTicket = HistoryDealGetTicket(i);
+        if (dealTicket == 0) continue;
+        
+        ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+        if (dealEntry == DEAL_ENTRY_IN) {
+            openPrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+            openTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+            break;
+        }
+    }
+    
+    // Calcola durata trade
+    int durationMinutes = (openTime > 0) ? (int)((closeTime - openTime) / 60) : 0;
+    
+    // Determina motivo chiusura (dal commento)
+    string closeReason = "SIGNAL";
+    string comment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+    if (StringFind(comment, "sl") >= 0 || StringFind(comment, "SL") >= 0) {
+        closeReason = "SL";
+    } else if (StringFind(comment, "tp") >= 0 || StringFind(comment, "TP") >= 0) {
+        closeReason = "TP";
+    } else if (StringFind(comment, "TIME") >= 0 || StringFind(comment, "time") >= 0) {
+        closeReason = "TIME_STOP";
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 AGGIORNA STATISTICHE
+    // ═══════════════════════════════════════════════════════════════
+    g_stats.totalTrades++;
+    
+    if (netProfit >= 0) {
+        g_stats.winTrades++;
+        g_stats.totalProfit += netProfit;
+        
+        // Streak
+        if (g_stats.currentStreak >= 0) {
+            g_stats.currentStreak++;
+        } else {
+            g_stats.currentStreak = 1;
+        }
+        if ((int)g_stats.currentStreak > g_stats.maxWinStreak) {
+            g_stats.maxWinStreak = (int)g_stats.currentStreak;
+        }
+    } else {
+        g_stats.lossTrades++;
+        g_stats.totalLoss += MathAbs(netProfit);
+        
+        // Streak
+        if (g_stats.currentStreak <= 0) {
+            g_stats.currentStreak--;
+        } else {
+            g_stats.currentStreak = -1;
+        }
+        if ((int)MathAbs(g_stats.currentStreak) > g_stats.maxLossStreak) {
+            g_stats.maxLossStreak = (int)MathAbs(g_stats.currentStreak);
+        }
+    }
+    
+    // Calcola metriche derivate
+    if (g_stats.winTrades > 0) {
+        g_stats.avgWin = g_stats.totalProfit / g_stats.winTrades;
+    }
+    if (g_stats.lossTrades > 0) {
+        g_stats.avgLoss = g_stats.totalLoss / g_stats.lossTrades;
+    }
+    if (g_stats.totalLoss > 0) {
+        g_stats.profitFactor = g_stats.totalProfit / g_stats.totalLoss;
+    }
+    if (g_stats.totalTrades > 0) {
+        double winRate = (double)g_stats.winTrades / g_stats.totalTrades;
+        g_stats.expectancy = (winRate * g_stats.avgWin) - ((1.0 - winRate) * g_stats.avgLoss);
+    }
+    
+    // Aggiorna drawdown
+    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+    if (currentEquity > g_stats.peakEquity) {
+        g_stats.peakEquity = currentEquity;
+    }
+    double currentDD = g_stats.peakEquity - currentEquity;
+    double currentDDPct = (g_stats.peakEquity > 0) ? (currentDD / g_stats.peakEquity * 100) : 0;
+    if (currentDD > g_stats.maxDrawdown) {
+        g_stats.maxDrawdown = currentDD;
+        g_stats.maxDrawdownPct = currentDDPct;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 LOG COMPLETO CHIUSURA TRADE
+    // ═══════════════════════════════════════════════════════════════
+    string profitIcon = (netProfit >= 0) ? "✅" : "❌";
+    string typeStr = (dealType == DEAL_TYPE_BUY) ? "SELL→CLOSE" : "BUY→CLOSE";
+    
+    Print("╔══════════════════════════════════════════════════════════════╗");
+    PrintFormat("║ %s TRADE CHIUSO #%I64u (%s)", profitIcon, positionId, closeReason);
+    Print("╠══════════════════════════════════════════════════════════════╣");
+    PrintFormat("║ Tipo: %s | Volume: %.2f lot", typeStr, volume);
+    PrintFormat("║ Entry: %.5f → Exit: %.5f", openPrice, closePrice);
+    PrintFormat("║ Profit: %.2f | Comm: %.2f | Swap: %.2f", profit, commission, swap);
+    PrintFormat("║ 💰 NET P/L: %+.2f %s", netProfit, AccountInfoString(ACCOUNT_CURRENCY));
+    PrintFormat("║ ⏱️ Durata: %d minuti (%.1f ore)", durationMinutes, durationMinutes / 60.0);
+    Print("╠══════════════════════════════════════════════════════════════╣");
+    PrintFormat("║ 📊 STATISTICHE CUMULATIVE");
+    PrintFormat("║ Trades: %d (W:%d L:%d) = %.1f%% WinRate", 
+        g_stats.totalTrades, g_stats.winTrades, g_stats.lossTrades,
+        g_stats.totalTrades > 0 ? (100.0 * g_stats.winTrades / g_stats.totalTrades) : 0);
+    PrintFormat("║ PF: %.2f | Expect: %.2f | AvgW: %.2f AvgL: %.2f", 
+        g_stats.profitFactor, g_stats.expectancy, g_stats.avgWin, g_stats.avgLoss);
+    PrintFormat("║ MaxDD: %.2f (%.2f%%) | Streak: %+d (W:%d L:%d)", 
+        g_stats.maxDrawdown, g_stats.maxDrawdownPct, (int)g_stats.currentStreak,
+        g_stats.maxWinStreak, g_stats.maxLossStreak);
+    Print("╚══════════════════════════════════════════════════════════════╝");
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 SALVA NEL BUFFER TRADE RECENTI (per analisi pattern)
+    // ═══════════════════════════════════════════════════════════════
+    if (g_recentTradesMax > 0) {
+        g_recentTrades[g_recentTradesIndex].ticket = positionId;
+        g_recentTrades[g_recentTradesIndex].openTime = openTime;
+        g_recentTrades[g_recentTradesIndex].closeTime = closeTime;
+        g_recentTrades[g_recentTradesIndex].type = (dealType == DEAL_TYPE_BUY) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+        g_recentTrades[g_recentTradesIndex].openPrice = openPrice;
+        g_recentTrades[g_recentTradesIndex].closePrice = closePrice;
+        g_recentTrades[g_recentTradesIndex].volume = volume;
+        g_recentTrades[g_recentTradesIndex].profit = netProfit;
+        g_recentTrades[g_recentTradesIndex].closeReason = closeReason;
+        
+        g_recentTradesIndex = (g_recentTradesIndex + 1) % g_recentTradesMax;
+        if (g_recentTradesCount < g_recentTradesMax) g_recentTradesCount++;
     }
 }
