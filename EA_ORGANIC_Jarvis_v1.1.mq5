@@ -492,7 +492,7 @@ int g_divergenceHistorySize = 0;         // Dimensione buffer
 int g_divergenceHistoryIndex = 0;        // Indice circolare
 double g_divergenceSum = 0.0;            // Somma incrementale (O(1))
 double g_divergenceSumSq = 0.0;          // Somma quadrati (O(1))
-double g_divergenceMinThreshold = 0.3;   // Soglia minima (start conservativo 30%)
+double g_divergenceMinThreshold = PHI_INV_CUB;  // 🌱 Soglia iniziale = φ⁻³ ≈ 23.6%
 bool g_divergenceThresholdReady = false; // True quando calcolata dai dati
 
 // 🌱 SOGLIA REVERSAL DATA-DRIVEN
@@ -503,7 +503,7 @@ int g_reversalHistorySize = 0;           // Dimensione buffer
 int g_reversalHistoryIndex = 0;          // Indice circolare corrente
 double g_reversalSum = 0.0;              // Somma incrementale (O(1))
 double g_reversalSumSq = 0.0;            // Somma quadrati (O(1))
-double g_reversalThreshold = 0.5;        // Soglia corrente (inizia conservativa)
+double g_reversalThreshold = PHI_INV;    // 🌱 Soglia iniziale = φ⁻¹ ≈ 61.8%
 bool g_reversalThresholdReady = false;   // True quando soglia calcolata dai dati
 
 // 🚀 COSTANTE CACHED: evita 4× SymbolInfoDouble per barra
@@ -809,6 +809,27 @@ int OnInit()
         Print("[ERROR] Errore inizializzazione indicatori");
         return INIT_FAILED;
     }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // 🔧 FIX: Verifica che almeno un indicatore DIREZIONALE sia abilitato
+    // Senza indicatori attivi, lo score sarà sempre 0 e nessun trade eseguito
+    // ═══════════════════════════════════════════════════════════════
+    int numIndicatorsEnabled = 0;
+    if (enableEMA)    numIndicatorsEnabled++;
+    if (enableRSI)    numIndicatorsEnabled++;
+    if (enableMACD)   numIndicatorsEnabled++;
+    if (enableBB)     numIndicatorsEnabled++;
+    if (enableHeikin) numIndicatorsEnabled++;
+    if (enableOBV)    numIndicatorsEnabled++;
+    if (enableADX)    numIndicatorsEnabled++;
+    
+    if (numIndicatorsEnabled == 0) {
+        Print("❌❌❌ [INIT] NESSUN INDICATORE ABILITATO!");
+        Print("   → Almeno uno tra EMA, RSI, MACD, BB, Heikin, OBV, ADX deve essere TRUE");
+        Print("   → EA non può generare segnali di trading");
+        return INIT_FAILED;
+    }
+    PrintFormat("[INIT] ✅ %d indicatori direzionali abilitati", numIndicatorsEnabled);
     
     // 🔧 FIX: Salva periodi iniziali per rilevamento cambi futuri
     SaveCurrentPeriodsAsPrevious();
@@ -2059,7 +2080,7 @@ void UpdateDynamicThreshold()
         // Significa: solo il top 38% degli score passa (proporzione aurea!)
         // ═══════════════════════════════════════════════════════════
         floorThreshold = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PHI_INV * 100.0);
-        floorType = "DATA-DRIVEN (P62)";
+        floorType = StringFormat("DATA-DRIVEN: Percentile %.0f° di %d score", PHI_INV * 100.0, g_scoreHistorySize);
     } else {
         // ═══════════════════════════════════════════════════════════
         // 🌱 FASE 1: FLOOR PRAGMATICO
@@ -2067,15 +2088,19 @@ void UpdateDynamicThreshold()
         // Verrà sostituito dal percentile quando avremo abbastanza dati
         // ═══════════════════════════════════════════════════════════
         floorThreshold = PHI_INV * 100.0;  // φ⁻¹ × 100 ≈ 61.8%
-        floorType = StringFormat("FALLBACK φ⁻¹ (%d/%d)", g_scoreHistorySize, minForPercentile);
+        floorType = StringFormat("FALLBACK: φ⁻¹ fisso (attesa %d/%d campioni per data-driven)", g_scoreHistorySize, minForPercentile);
     }
     
     double dataThreshold = mean + stdev * PHI;  // mean + stdev × φ
+    
+    // Determina quale componente "vince"
+    bool floorWins = (floorThreshold > dataThreshold);
     
     g_dynamicThreshold = MathMax(floorThreshold, dataThreshold);
     
     // ✅ VALIDATO: Ceiling organico a 1-φ⁻³ ≈ 76.4% - non troppo restrittivo
     double maxThreshold = (1.0 - PHI_INV_CUB) * 100.0;  // ≈ 76.4%
+    bool ceilingApplied = (g_dynamicThreshold > maxThreshold);
     g_dynamicThreshold = MathMin(maxThreshold, g_dynamicThreshold);
     g_scoreThresholdReady = true;  // ✅ Flag: dati pronti
     
@@ -2083,8 +2108,13 @@ void UpdateDynamicThreshold()
     double minChangeForLog = stdev * PHI_INV_SQ;  // Derivato dai DATI
     if (minChangeForLog < 0.1) minChangeForLog = 0.1;  // Minimo assoluto per evitare spam
     if (g_enableLogsEffective && MathAbs(g_dynamicThreshold - oldThreshold) > minChangeForLog) {
-        PrintFormat("[THRESHOLD] 🌱 Soglia: %.1f%% → %.1f%% | Floor=%.1f%% [%s] | Data=%.1f%% (mean=%.1f%% + stdev=%.1f%% × φ)",
-            oldThreshold, g_dynamicThreshold, floorThreshold, floorType, dataThreshold, mean, stdev);
+        // Log dettagliato che spiega esattamente come è stata calcolata la soglia
+        PrintFormat("[THRESHOLD] 🌱 Soglia: %.1f%% → %.1f%%", oldThreshold, g_dynamicThreshold);
+        PrintFormat("   📊 Floor: %.1f%% [%s]", floorThreshold, floorType);
+        PrintFormat("   📈 Data: %.1f%% = mean(%.1f%%) + stdev(%.1f%%) × φ", dataThreshold, mean, stdev);
+        PrintFormat("   🎯 Decisione: %s%s", 
+            floorWins ? "FLOOR vince (protegge da soglia troppo bassa)" : "DATA vince (mercato richiede soglia alta)",
+            ceilingApplied ? " | ⚠️ CEILING 76.4% applicato" : "");
     }
 }
 
@@ -2148,7 +2178,7 @@ void InitReversalDetectors()
     g_divergenceHistoryIndex = 0;
     g_divergenceSum = 0.0;
     g_divergenceSumSq = 0.0;
-    g_divergenceMinThreshold = 0.3;      // Start conservativo (30%)
+    g_divergenceMinThreshold = PHI_INV_CUB;  // 🌱 Start = φ⁻³ ≈ 23.6%
     g_divergenceThresholdReady = false;
     
     // 🌱 SOGLIA REVERSAL DATA-DRIVEN: buffer φ⁸ ≈ 47
@@ -2159,7 +2189,7 @@ void InitReversalDetectors()
     g_reversalHistoryIndex = 0;
     g_reversalSum = 0.0;
     g_reversalSumSq = 0.0;
-    g_reversalThreshold = 0.5;           // Start conservativo (50%)
+    g_reversalThreshold = PHI_INV;       // 🌱 Start = φ⁻¹ ≈ 61.8%
     g_reversalThresholdReady = false;
     
     if (g_enableLogsEffective) {
@@ -3054,11 +3084,11 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
         }
         // 🔧 FIX: Garantire sempre scala minima positiva per evitare DIV/0
         if (data.obv_scale <= 0) {
-            data.obv_scale = 1.0;  // Minimo assoluto
+            data.obv_scale = MathPow(PHI, 7);  // 🌱 Minimo = φ⁷ ≈ 29
         }
     } else {
-        // OBV non disponibile, usa fallback conservativo
-        data.obv_scale = 1000.0;  // Valore tipico per volumi OBV
+        // OBV non disponibile, usa fallback organico
+        data.obv_scale = MathPow(PHI, 10);  // 🌱 φ¹⁰ ≈ 123 (valore tipico per volumi)
     }
     
     if (g_enableLogsEffective) {
@@ -4472,13 +4502,13 @@ void OnTick()
     }
     
     // ═══════════════════════════════════════════════════════════════
-    // 🌱 barsToLoad = max(sma200 di tutti i TF) × φ (buffer statistico)
-    // Usiamo il max tra tutti i periodi organici, NON φ^12 arbitrario!
-    // sma200 è sempre il periodo più lungo (longest in CalculateOrganicPeriods)
+    // 🌱 barsToLoad = max(min_bars_required di tutti i TF) × φ (buffer statistico)
+    // Usiamo il max tra tutti i periodi organici già calcolati
+    // min_bars_required = longest period + buffer organico (calcolato in CalculateOrganicPeriods)
     // ═══════════════════════════════════════════════════════════════=
-    int maxPeriodNeeded = MathMax(g_organic_M5.sma200, 
-                          MathMax(g_organic_H1.sma200,
-                          MathMax(g_organic_H4.sma200, g_organic_D1.sma200)));
+    int maxPeriodNeeded = MathMax(g_organic_M5.min_bars_required, 
+                          MathMax(g_organic_H1.min_bars_required,
+                          MathMax(g_organic_H4.min_bars_required, g_organic_D1.min_bars_required)));
     // Buffer = periodo max × φ (per avere overlap statistico)
     int barsToLoad = (int)MathRound(maxPeriodNeeded * PHI);
     // 🌱 Minimo organico = φ⁸ ≈ 47 (derivato da potenza di φ)
@@ -4944,250 +4974,86 @@ int ExecuteVotingLogic()
         }
     }
     
-    // H1 INDICATORS
+    // H1 INDICATORS - Usa solo indicatori esistenti in TimeFrameData
     if (g_vote_H1_active && g_enableLogsEffective) {
         int h1_idx = ArraySize(tfData_H1.rsi) - 1;
         if (h1_idx < 0) {
             Print("\n--- H1: DATI NON DISPONIBILI ---");
         } else {
-        Print("\n--- H1 (INTERMEDIO) ---");
-        PrintFormat("  🌱 Peso organico TF: %.2f", tfData_H1.organic.weight);
-    double h1_psarValue = (ArraySize(tfData_H1.psar) > h1_idx) ? tfData_H1.psar[h1_idx] : 0.0;
-    bool h1_psarValid = (h1_psarValue != 0.0);
-    bool h1_cPSAR = h1_psarValid && (price > h1_psarValue);
-    double h1_close = (ArraySize(tfData_H1.rates) > h1_idx) ? tfData_H1.rates[h1_idx].close : price;
-    double h1_spanA = (ArraySize(tfData_H1.ichimoku_spanA) > h1_idx) ? tfData_H1.ichimoku_spanA[h1_idx] : 0;
-    double h1_spanB = (ArraySize(tfData_H1.ichimoku_spanB) > h1_idx) ? tfData_H1.ichimoku_spanB[h1_idx] : 0;
-    double h1_cloudTop = MathMax(h1_spanA, h1_spanB);
-    int h1_prevIdx = (h1_idx > 0) ? h1_idx - 1 : 0;
-    double h1_mom = (ArraySize(tfData_H1.momentum) > h1_idx) ? tfData_H1.momentum[h1_idx] : 0;
-    bool h1_cMOM = h1_mom > tfData_H1.momentum_center;
-    double h1_ema = (ArraySize(tfData_H1.ema) > h1_idx) ? tfData_H1.ema[h1_idx] : 0;
-    PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s",
-        price, h1_ema, (price > h1_ema) ? "BUY" : "SELL");
-    // 🛡️ Estrai valori con controlli ArraySize
-    double h1_rsi = (ArraySize(tfData_H1.rsi) > h1_idx) ? tfData_H1.rsi[h1_idx] : 0;
-    double h1_adx = (ArraySize(tfData_H1.adx) > h1_idx) ? tfData_H1.adx[h1_idx] : 0;
-    double h1_cci = (ArraySize(tfData_H1.cci) > h1_idx) ? tfData_H1.cci[h1_idx] : 0;
-    double h1_ha_close = (ArraySize(tfData_H1.ha_close) > h1_idx) ? tfData_H1.ha_close[h1_idx] : 0;
-    double h1_ha_open = (ArraySize(tfData_H1.ha_open) > h1_idx) ? tfData_H1.ha_open[h1_idx] : 0;
-    double h1_wpr = (ArraySize(tfData_H1.wpr) > h1_idx) ? tfData_H1.wpr[h1_idx] : 0;
-    double h1_ao = (ArraySize(tfData_H1.ao) > h1_idx) ? tfData_H1.ao[h1_idx] : 0;
-    double h1_obv = (ArraySize(tfData_H1.obv) > h1_idx) ? tfData_H1.obv[h1_idx] : 0;
-    double h1_obv_prev = (ArraySize(tfData_H1.obv) > h1_prevIdx) ? tfData_H1.obv[h1_prevIdx] : 0;
-    double h1_mfi = (ArraySize(tfData_H1.mfi) > h1_idx) ? tfData_H1.mfi[h1_idx] : 0;
-    double h1_don_prev = (ArraySize(tfData_H1.donchian_upper) > h1_prevIdx) ? tfData_H1.donchian_upper[h1_prevIdx] : 0;
-    
-    PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s",
-        h1_rsi, tfData_H1.rsi_center, 
-        (h1_rsi > tfData_H1.rsi_center) ? "BUY" : "SELL");
-    PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s (vota con +DI/-DI)",
-        h1_adx, tfData_H1.adx_threshold,
-        (h1_adx > tfData_H1.adx_threshold) ? "TREND" : "NO TREND");
-    PrintFormat("  CCI: %.2f vs Centro Empirico=%.2f → %s",
-        h1_cci, tfData_H1.cci_center,
-        (h1_cci > tfData_H1.cci_center) ? "BUY" : "SELL");
-    PrintFormat("  PSAR: Price=%.5f vs SAR=%.5f → %s",
-        price, h1_psarValue, h1_cPSAR ? "BUY" : "SELL");
-    PrintFormat("  Momentum: %.2f vs Centro Empirico=%.2f → %s",
-        h1_mom, tfData_H1.momentum_center,
-        h1_cMOM ? "BUY" : "SELL");
-    PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s",
-        h1_ha_close, h1_ha_open,
-        (h1_ha_close > h1_ha_open) ? "BUY" : "SELL");
-    PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
-        h1_wpr, tfData_H1.wpr_center,
-        (h1_wpr > tfData_H1.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        h1_ao, tfData_H1.ao_center,
-        (h1_ao > tfData_H1.ao_center) ? "BUY" : "SELL");
-    PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
-        h1_obv, h1_obv_prev,
-        (h1_obv >= h1_obv_prev) ? "BUY" : "SELL");
-    PrintFormat("  MFI: %.2f vs Centro Empirico=%.2f → %s",
-        h1_mfi, tfData_H1.mfi_center,
-        (h1_mfi > tfData_H1.mfi_center) ? "BUY" : "SELL");
-    PrintFormat("  Donchian: Close=%.5f vs UpperPrev=%.5f → %s",
-        h1_close, h1_don_prev,
-        (h1_close > h1_don_prev) ? "BREAKOUT" : "NO BREAK");
-    PrintFormat("  Ichimoku: Price=%.5f vs CloudTop=%.5f → %s",
-        h1_close, h1_cloudTop,
-        (h1_close > h1_cloudTop) ? "ABOVE" : "INSIDE/BELOW");
-        // SMA Cross log
-        double sma50_H1 = (ArraySize(tfData_H1.sma50) > h1_idx) ? tfData_H1.sma50[h1_idx] : 0;
-        double sma200_H1 = (ArraySize(tfData_H1.sma200) > h1_idx) ? tfData_H1.sma200[h1_idx] : 0;
-        string smaCross_H1 = (sma50_H1 > sma200_H1) ? "Golden Cross" : ((sma50_H1 < sma200_H1) ? "Death Cross" : "Flat");
-        string smaPos_H1 = (h1_close > sma50_H1 && h1_close > sma200_H1) ? "ABOVE BOTH" : ((h1_close < sma50_H1 && h1_close < sma200_H1) ? "BELOW BOTH" : "BETWEEN");
-        PrintFormat("  SMA Cross: SMA50=%.5f vs SMA200=%.5f → %s | Price %s",
-            sma50_H1, sma200_H1, smaCross_H1, smaPos_H1);
-        PrintFormat("  🎯 SCORE H1: %.2f", scoreH1);
-        } // fine else h1_idx >= 0
+            Print("\n--- H1 (INTERMEDIO) ---");
+            PrintFormat("  🌱 Peso organico TF: %.2f", tfData_H1.organic.weight);
+            double h1_close = (ArraySize(tfData_H1.rates) > h1_idx) ? tfData_H1.rates[h1_idx].close : price;
+            int h1_prevIdx = (h1_idx > 0) ? h1_idx - 1 : 0;
+            double h1_ema = (ArraySize(tfData_H1.ema) > h1_idx) ? tfData_H1.ema[h1_idx] : 0;
+            double h1_rsi = (ArraySize(tfData_H1.rsi) > h1_idx) ? tfData_H1.rsi[h1_idx] : 0;
+            double h1_adx = (ArraySize(tfData_H1.adx) > h1_idx) ? tfData_H1.adx[h1_idx] : 0;
+            double h1_ha_close = (ArraySize(tfData_H1.ha_close) > h1_idx) ? tfData_H1.ha_close[h1_idx] : 0;
+            double h1_ha_open = (ArraySize(tfData_H1.ha_open) > h1_idx) ? tfData_H1.ha_open[h1_idx] : 0;
+            double h1_obv = (ArraySize(tfData_H1.obv) > h1_idx) ? tfData_H1.obv[h1_idx] : 0;
+            double h1_obv_prev = (ArraySize(tfData_H1.obv) > h1_prevIdx) ? tfData_H1.obv[h1_prevIdx] : 0;
+            PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s", price, h1_ema, (price > h1_ema) ? "BUY" : "SELL");
+            PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s", h1_rsi, tfData_H1.rsi_center, (h1_rsi > tfData_H1.rsi_center) ? "BUY" : "SELL");
+            PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s", h1_adx, tfData_H1.adx_threshold, (h1_adx > tfData_H1.adx_threshold) ? "TREND" : "NO TREND");
+            PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s", h1_ha_close, h1_ha_open, (h1_ha_close > h1_ha_open) ? "BUY" : "SELL");
+            PrintFormat("  OBV: %.0f vs Prev=%.0f → %s", h1_obv, h1_obv_prev, (h1_obv >= h1_obv_prev) ? "BUY" : "SELL");
+            PrintFormat("  🎯 SCORE H1: %.2f", scoreH1);
+        }
     } else if (g_enableLogsEffective) {
         Print("  📊 H1 Score:  N/D (DISATTIVATO)");
     }
     
-    // H4 INDICATORS
+    // H4 INDICATORS - Usa solo indicatori esistenti in TimeFrameData
     if (g_vote_H4_active && g_enableLogsEffective) {
         int h4_idx = ArraySize(tfData_H4.rsi) - 1;
         if (h4_idx < 0) {
             Print("\n--- H4: DATI NON DISPONIBILI ---");
         } else {
-        Print("\n--- H4 (SWING) ---");
-        PrintFormat("  🌱 Peso organico TF: %.2f", tfData_H4.organic.weight);
-    double h4_psarValue = (ArraySize(tfData_H4.psar) > h4_idx) ? tfData_H4.psar[h4_idx] : 0.0;
-    bool h4_psarValid = (h4_psarValue != 0.0);
-    bool h4_cPSAR = h4_psarValid && (price > h4_psarValue);
-    double h4_close = (ArraySize(tfData_H4.rates) > h4_idx) ? tfData_H4.rates[h4_idx].close : price;
-    double h4_spanA = (ArraySize(tfData_H4.ichimoku_spanA) > h4_idx) ? tfData_H4.ichimoku_spanA[h4_idx] : 0;
-    double h4_spanB = (ArraySize(tfData_H4.ichimoku_spanB) > h4_idx) ? tfData_H4.ichimoku_spanB[h4_idx] : 0;
-    double h4_cloudTop = MathMax(h4_spanA, h4_spanB);
-    int h4_prevIdx = (h4_idx > 0) ? h4_idx - 1 : 0;
-    double h4_mom = (ArraySize(tfData_H4.momentum) > h4_idx) ? tfData_H4.momentum[h4_idx] : 0;
-    bool h4_cMOM = h4_mom > tfData_H4.momentum_center;
-    double h4_ema = (ArraySize(tfData_H4.ema) > h4_idx) ? tfData_H4.ema[h4_idx] : 0;
-    PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s",
-        price, h4_ema, (price > h4_ema) ? "BUY" : "SELL");
-    
-    // 🛡️ Estrai valori con controlli ArraySize
-    double h4_rsi = (ArraySize(tfData_H4.rsi) > h4_idx) ? tfData_H4.rsi[h4_idx] : 0;
-    double h4_adx = (ArraySize(tfData_H4.adx) > h4_idx) ? tfData_H4.adx[h4_idx] : 0;
-    double h4_cci = (ArraySize(tfData_H4.cci) > h4_idx) ? tfData_H4.cci[h4_idx] : 0;
-    double h4_ha_close = (ArraySize(tfData_H4.ha_close) > h4_idx) ? tfData_H4.ha_close[h4_idx] : 0;
-    double h4_ha_open = (ArraySize(tfData_H4.ha_open) > h4_idx) ? tfData_H4.ha_open[h4_idx] : 0;
-    double h4_wpr = (ArraySize(tfData_H4.wpr) > h4_idx) ? tfData_H4.wpr[h4_idx] : 0;
-    double h4_ao = (ArraySize(tfData_H4.ao) > h4_idx) ? tfData_H4.ao[h4_idx] : 0;
-    double h4_obv = (ArraySize(tfData_H4.obv) > h4_idx) ? tfData_H4.obv[h4_idx] : 0;
-    double h4_obv_prev = (ArraySize(tfData_H4.obv) > h4_prevIdx) ? tfData_H4.obv[h4_prevIdx] : 0;
-    double h4_mfi = (ArraySize(tfData_H4.mfi) > h4_idx) ? tfData_H4.mfi[h4_idx] : 0;
-    double h4_don_prev = (ArraySize(tfData_H4.donchian_upper) > h4_prevIdx) ? tfData_H4.donchian_upper[h4_prevIdx] : 0;
-    
-    PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s",
-        h4_rsi, tfData_H4.rsi_center,
-        (h4_rsi > tfData_H4.rsi_center) ? "BUY" : "SELL");
-    PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s (vota con +DI/-DI)",
-        h4_adx, tfData_H4.adx_threshold,
-        (h4_adx > tfData_H4.adx_threshold) ? "TREND" : "NO TREND");
-    PrintFormat("  CCI: %.2f vs Centro Empirico=%.2f → %s",
-        h4_cci, tfData_H4.cci_center,
-        (h4_cci > tfData_H4.cci_center) ? "BUY" : "SELL");
-    PrintFormat("  PSAR: Price=%.5f vs SAR=%.5f → %s",
-        price, h4_psarValue, h4_cPSAR ? "BUY" : "SELL");
-    PrintFormat("  Momentum: %.2f vs Centro Empirico=%.2f → %s",
-        h4_mom, tfData_H4.momentum_center,
-        h4_cMOM ? "BUY" : "SELL");
-    PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s",
-        h4_ha_close, h4_ha_open,
-        (h4_ha_close > h4_ha_open) ? "BUY" : "SELL");
-    PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
-        h4_wpr, tfData_H4.wpr_center,
-        (h4_wpr > tfData_H4.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        h4_ao, tfData_H4.ao_center,
-        (h4_ao > tfData_H4.ao_center) ? "BUY" : "SELL");
-    PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
-        h4_obv, h4_obv_prev,
-        (h4_obv >= h4_obv_prev) ? "BUY" : "SELL");
-    PrintFormat("  MFI: %.2f vs Centro Empirico=%.2f → %s",
-        h4_mfi, tfData_H4.mfi_center,
-        (h4_mfi > tfData_H4.mfi_center) ? "BUY" : "SELL");
-    PrintFormat("  Donchian: Close=%.5f vs UpperPrev=%.5f → %s",
-        h4_close, h4_don_prev,
-        (h4_close > h4_don_prev) ? "BREAKOUT" : "NO BREAK");
-    PrintFormat("  Ichimoku: Price=%.5f vs CloudTop=%.5f → %s",
-        h4_close, h4_cloudTop,
-        (h4_close > h4_cloudTop) ? "ABOVE" : "INSIDE/BELOW");
-        // SMA Cross log
-        double sma50_H4 = (ArraySize(tfData_H4.sma50) > h4_idx) ? tfData_H4.sma50[h4_idx] : 0;
-        double sma200_H4 = (ArraySize(tfData_H4.sma200) > h4_idx) ? tfData_H4.sma200[h4_idx] : 0;
-        string smaCross_H4 = (sma50_H4 > sma200_H4) ? "Golden Cross" : ((sma50_H4 < sma200_H4) ? "Death Cross" : "Flat");
-        string smaPos_H4 = (h4_close > sma50_H4 && h4_close > sma200_H4) ? "ABOVE BOTH" : ((h4_close < sma50_H4 && h4_close < sma200_H4) ? "BELOW BOTH" : "BETWEEN");
-        PrintFormat("  SMA Cross: SMA50=%.5f vs SMA200=%.5f → %s | Price %s",
-            sma50_H4, sma200_H4, smaCross_H4, smaPos_H4);
-        PrintFormat("  🎯 SCORE H4: %.2f", scoreH4);
-        } // fine else h4_idx >= 0
+            Print("\n--- H4 (SWING) ---");
+            PrintFormat("  🌱 Peso organico TF: %.2f", tfData_H4.organic.weight);
+            double h4_close = (ArraySize(tfData_H4.rates) > h4_idx) ? tfData_H4.rates[h4_idx].close : price;
+            int h4_prevIdx = (h4_idx > 0) ? h4_idx - 1 : 0;
+            double h4_ema = (ArraySize(tfData_H4.ema) > h4_idx) ? tfData_H4.ema[h4_idx] : 0;
+            double h4_rsi = (ArraySize(tfData_H4.rsi) > h4_idx) ? tfData_H4.rsi[h4_idx] : 0;
+            double h4_adx = (ArraySize(tfData_H4.adx) > h4_idx) ? tfData_H4.adx[h4_idx] : 0;
+            double h4_ha_close = (ArraySize(tfData_H4.ha_close) > h4_idx) ? tfData_H4.ha_close[h4_idx] : 0;
+            double h4_ha_open = (ArraySize(tfData_H4.ha_open) > h4_idx) ? tfData_H4.ha_open[h4_idx] : 0;
+            double h4_obv = (ArraySize(tfData_H4.obv) > h4_idx) ? tfData_H4.obv[h4_idx] : 0;
+            double h4_obv_prev = (ArraySize(tfData_H4.obv) > h4_prevIdx) ? tfData_H4.obv[h4_prevIdx] : 0;
+            PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s", price, h4_ema, (price > h4_ema) ? "BUY" : "SELL");
+            PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s", h4_rsi, tfData_H4.rsi_center, (h4_rsi > tfData_H4.rsi_center) ? "BUY" : "SELL");
+            PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s", h4_adx, tfData_H4.adx_threshold, (h4_adx > tfData_H4.adx_threshold) ? "TREND" : "NO TREND");
+            PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s", h4_ha_close, h4_ha_open, (h4_ha_close > h4_ha_open) ? "BUY" : "SELL");
+            PrintFormat("  OBV: %.0f vs Prev=%.0f → %s", h4_obv, h4_obv_prev, (h4_obv >= h4_obv_prev) ? "BUY" : "SELL");
+            PrintFormat("  🎯 SCORE H4: %.2f", scoreH4);
+        }
     } else if (g_enableLogsEffective) {
         Print("  📊 H4 Score:  N/D (DISATTIVATO)");
     }
     
-    // D1 INDICATORS
+    // D1 INDICATORS - Usa solo indicatori esistenti in TimeFrameData
     if (g_vote_D1_active && g_enableLogsEffective) {
         int d1_idx = ArraySize(tfData_D1.rsi) - 1;
         if (d1_idx < 0) {
             Print("\n--- D1: DATI NON DISPONIBILI ---");
         } else {
-        Print("\n--- D1 (TREND LUNGO) ---");
-        PrintFormat("  🌱 Peso organico TF: %.2f", tfData_D1.organic.weight);
-    double d1_psarValue = (ArraySize(tfData_D1.psar) > d1_idx) ? tfData_D1.psar[d1_idx] : 0.0;
-    bool d1_psarValid = (d1_psarValue != 0.0);
-    bool d1_cPSAR = d1_psarValid && (price > d1_psarValue);
-    double d1_close = (ArraySize(tfData_D1.rates) > d1_idx) ? tfData_D1.rates[d1_idx].close : price;
-    double d1_spanA = (ArraySize(tfData_D1.ichimoku_spanA) > d1_idx) ? tfData_D1.ichimoku_spanA[d1_idx] : 0;
-    double d1_spanB = (ArraySize(tfData_D1.ichimoku_spanB) > d1_idx) ? tfData_D1.ichimoku_spanB[d1_idx] : 0;
-    double d1_cloudTop = MathMax(d1_spanA, d1_spanB);
-    int d1_prevIdx = (d1_idx > 0) ? d1_idx - 1 : 0;
-    double d1_mom = (ArraySize(tfData_D1.momentum) > d1_idx) ? tfData_D1.momentum[d1_idx] : 0;
-    bool d1_cMOM = d1_mom > tfData_D1.momentum_center;
-    double d1_ema = (ArraySize(tfData_D1.ema) > d1_idx) ? tfData_D1.ema[d1_idx] : 0;
-    PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s",
-        price, d1_ema, (price > d1_ema) ? "BUY" : "SELL");
-    
-    // 🛡️ Estrai valori con controlli ArraySize
-    double d1_rsi = (ArraySize(tfData_D1.rsi) > d1_idx) ? tfData_D1.rsi[d1_idx] : 0;
-    double d1_adx = (ArraySize(tfData_D1.adx) > d1_idx) ? tfData_D1.adx[d1_idx] : 0;
-    double d1_cci = (ArraySize(tfData_D1.cci) > d1_idx) ? tfData_D1.cci[d1_idx] : 0;
-    double d1_ha_close = (ArraySize(tfData_D1.ha_close) > d1_idx) ? tfData_D1.ha_close[d1_idx] : 0;
-    double d1_ha_open = (ArraySize(tfData_D1.ha_open) > d1_idx) ? tfData_D1.ha_open[d1_idx] : 0;
-    double d1_wpr = (ArraySize(tfData_D1.wpr) > d1_idx) ? tfData_D1.wpr[d1_idx] : 0;
-    double d1_ao = (ArraySize(tfData_D1.ao) > d1_idx) ? tfData_D1.ao[d1_idx] : 0;
-    double d1_obv = (ArraySize(tfData_D1.obv) > d1_idx) ? tfData_D1.obv[d1_idx] : 0;
-    double d1_obv_prev = (ArraySize(tfData_D1.obv) > d1_prevIdx) ? tfData_D1.obv[d1_prevIdx] : 0;
-    double d1_mfi = (ArraySize(tfData_D1.mfi) > d1_idx) ? tfData_D1.mfi[d1_idx] : 0;
-    double d1_don_prev = (ArraySize(tfData_D1.donchian_upper) > d1_prevIdx) ? tfData_D1.donchian_upper[d1_prevIdx] : 0;
-    
-    PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s",
-        d1_rsi, tfData_D1.rsi_center,
-        (d1_rsi > tfData_D1.rsi_center) ? "BUY" : "SELL");
-    PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s (vota con +DI/-DI)",
-        d1_adx, tfData_D1.adx_threshold,
-        (d1_adx > tfData_D1.adx_threshold) ? "TREND" : "NO TREND");
-    PrintFormat("  CCI: %.2f vs Centro Empirico=%.2f → %s",
-        d1_cci, tfData_D1.cci_center,
-        (d1_cci > tfData_D1.cci_center) ? "BUY" : "SELL");
-    PrintFormat("  PSAR: Price=%.5f vs SAR=%.5f → %s",
-        price, d1_psarValue, d1_cPSAR ? "BUY" : "SELL");
-    PrintFormat("  Momentum: %.2f vs Centro Empirico=%.2f → %s",
-        d1_mom, tfData_D1.momentum_center,
-        d1_cMOM ? "BUY" : "SELL");
-    PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s",
-        d1_ha_close, d1_ha_open,
-        (d1_ha_close > d1_ha_open) ? "BUY" : "SELL");
-    PrintFormat("  WPR: %.2f vs Centro Empirico=%.2f → %s",
-        d1_wpr, tfData_D1.wpr_center,
-        (d1_wpr > tfData_D1.wpr_center) ? "BUY" : "SELL");
-    PrintFormat("  AO: %.5f vs Centro Empirico=%.5f → %s",
-        d1_ao, tfData_D1.ao_center,
-        (d1_ao > tfData_D1.ao_center) ? "BUY" : "SELL");
-    PrintFormat("  OBV: %.0f vs Prev=%.0f → %s",
-        d1_obv, d1_obv_prev,
-        (d1_obv >= d1_obv_prev) ? "BUY" : "SELL");
-    PrintFormat("  MFI: %.2f vs Centro Empirico=%.2f → %s",
-        d1_mfi, tfData_D1.mfi_center,
-        (d1_mfi > tfData_D1.mfi_center) ? "BUY" : "SELL");
-    PrintFormat("  Donchian: Close=%.5f vs UpperPrev=%.5f → %s",
-        d1_close, d1_don_prev,
-        (d1_close > d1_don_prev) ? "BREAKOUT" : "NO BREAK");
-    PrintFormat("  Ichimoku: Price=%.5f vs CloudTop=%.5f → %s",
-        d1_close, d1_cloudTop,
-        (d1_close > d1_cloudTop) ? "ABOVE" : "INSIDE/BELOW");
-        // SMA Cross log
-        double sma50_D1 = (ArraySize(tfData_D1.sma50) > d1_idx) ? tfData_D1.sma50[d1_idx] : 0;
-        double sma200_D1 = (ArraySize(tfData_D1.sma200) > d1_idx) ? tfData_D1.sma200[d1_idx] : 0;
-        string smaCross_D1 = (sma50_D1 > sma200_D1) ? "Golden Cross" : ((sma50_D1 < sma200_D1) ? "Death Cross" : "Flat");
-        string smaPos_D1 = (d1_close > sma50_D1 && d1_close > sma200_D1) ? "ABOVE BOTH" : ((d1_close < sma50_D1 && d1_close < sma200_D1) ? "BELOW BOTH" : "BETWEEN");
-        PrintFormat("  SMA Cross: SMA50=%.5f vs SMA200=%.5f → %s | Price %s",
-            sma50_D1, sma200_D1, smaCross_D1, smaPos_D1);
-        PrintFormat("  🎯 SCORE D1: %.2f", scoreD1);
-        } // fine else d1_idx >= 0
+            Print("\n--- D1 (TREND LUNGO) ---");
+            PrintFormat("  🌱 Peso organico TF: %.2f", tfData_D1.organic.weight);
+            double d1_close = (ArraySize(tfData_D1.rates) > d1_idx) ? tfData_D1.rates[d1_idx].close : price;
+            int d1_prevIdx = (d1_idx > 0) ? d1_idx - 1 : 0;
+            double d1_ema = (ArraySize(tfData_D1.ema) > d1_idx) ? tfData_D1.ema[d1_idx] : 0;
+            double d1_rsi = (ArraySize(tfData_D1.rsi) > d1_idx) ? tfData_D1.rsi[d1_idx] : 0;
+            double d1_adx = (ArraySize(tfData_D1.adx) > d1_idx) ? tfData_D1.adx[d1_idx] : 0;
+            double d1_ha_close = (ArraySize(tfData_D1.ha_close) > d1_idx) ? tfData_D1.ha_close[d1_idx] : 0;
+            double d1_ha_open = (ArraySize(tfData_D1.ha_open) > d1_idx) ? tfData_D1.ha_open[d1_idx] : 0;
+            double d1_obv = (ArraySize(tfData_D1.obv) > d1_idx) ? tfData_D1.obv[d1_idx] : 0;
+            double d1_obv_prev = (ArraySize(tfData_D1.obv) > d1_prevIdx) ? tfData_D1.obv[d1_prevIdx] : 0;
+            PrintFormat("  EMA: Price=%.5f vs EMA=%.5f → %s", price, d1_ema, (price > d1_ema) ? "BUY" : "SELL");
+            PrintFormat("  RSI: %.2f vs Centro Empirico=%.2f → %s", d1_rsi, tfData_D1.rsi_center, (d1_rsi > tfData_D1.rsi_center) ? "BUY" : "SELL");
+            PrintFormat("  ADX: %.2f vs Soglia Organica=%.2f → %s", d1_adx, tfData_D1.adx_threshold, (d1_adx > tfData_D1.adx_threshold) ? "TREND" : "NO TREND");
+            PrintFormat("  Heikin: HAclose=%.5f vs HAopen=%.5f → %s", d1_ha_close, d1_ha_open, (d1_ha_close > d1_ha_open) ? "BUY" : "SELL");
+            PrintFormat("  OBV: %.0f vs Prev=%.0f → %s", d1_obv, d1_obv_prev, (d1_obv >= d1_obv_prev) ? "BUY" : "SELL");
+            PrintFormat("  🎯 SCORE D1: %.2f", scoreD1);
+        }
     } else if (g_enableLogsEffective) {
         Print("  📊 D1 Score:  N/D (DISATTIVATO)");
     }
