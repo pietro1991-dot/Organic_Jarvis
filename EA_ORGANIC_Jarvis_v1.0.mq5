@@ -137,6 +137,7 @@ input bool   EnableVote_D1             = true;  // Usa timeframe D1 nel voto
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 input group "═══ 📝 LOG ═══"
 input bool   EnableLogs                = true;  // 🌱 Abilita TUTTI i log (true=completi, false=silenzioso)
+input bool   ExportTradesCSV           = true;  // 📊 Esporta trade in CSV per Monte Carlo
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🌱 SISTEMA 100% ORGANICO - Nessun valore hardcodato
@@ -1847,6 +1848,7 @@ void RecalculateHurstSumsFromScratch()
 //| 🌱 FILTRO HURST: Check finale prima di aprire trade              |
 //| Ritorna true se il trade è permesso, false se bloccato           |
 //| NOTA: Il ricalcolo avviene ora in RecalculateOrganicSystem()     |
+//| 🔧 FIX: Log rimosso da qui - stampato solo se c'era segnale      |
 //+------------------------------------------------------------------+
 bool IsTradeAllowedByHurst()
 {
@@ -1855,13 +1857,15 @@ bool IsTradeAllowedByHurst()
     // Il ricalcolo avviene ad ogni nuova barra in RecalculateOrganicSystem()
     // Qui verifichiamo solo il flag
     if (!g_hurstReady) {
-        Print("[HURST] ⏳ Hurst NON pronto: servono piu' dati per zona/stdev e soglia tradeScore");
+        // Log solo una volta ogni 100 barre per evitare spam
+        static int hurstNotReadyCount = 0;
+        hurstNotReadyCount++;
+        if (hurstNotReadyCount == 1 || hurstNotReadyCount % 100 == 0) {
+            PrintFormat("[HURST] ⏳ Hurst NON pronto (%d barre) - servono piu' dati per zona/stdev", hurstNotReadyCount);
+        }
         return false;
     }
-    if (!g_hurstAllowTrade) {
-        PrintFormat("[HURST] ⛔ TRADE BLOCCATO - TradeScore=%.3f < %.3f (soglia)", 
-            g_hurstTradeScore, g_tradeScoreThreshold);
-    }
+    // 🔧 FIX: Log "TRADE BLOCCATO" rimosso - stampato in ExecuteTrades solo se c'era segnale
     
     return g_hurstAllowTrade;
 }
@@ -2074,43 +2078,54 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     
     // ═══════════════════════════════════════════════════════════════
     // 🌱 APPROCCIO 100% DATA-DRIVEN (PURO - NO FALLBACK):
-    // 1. Chiediamo TUTTE le barre disponibili
+    // 1. Chiediamo barre dal PASSATO (non dalla barra corrente!)
     // 2. maxLag = barre_disponibili / φ² (derivato dai DATI!)
     // 3. Il periodo naturale emerge dall'autocorrelazione
     // Se non ci sono abbastanza dati, ritorna valid=false (TF disabilitato)
+    // 
+    // 🔧 FIX: In backtest, Bars() ritorna solo le barre "generate" fino a quel momento
+    // Invece usiamo CopyRates con start dalla barra 1 (passato) per forzare
+    // il caricamento dei dati storici pre-esistenti!
     // ═══════════════════════════════════════════════════════════════
     
-    // Prima: scopri quante barre sono disponibili per questo TF
-    int barsAvailable = Bars(_Symbol, tf);
+    // 🔧 FIX: Richiediamo φ¹⁰ ≈ 123 barre storiche (sufficiente per analisi)
+    int barsToRequest = (int)MathRound(MathPow(PHI, 10));  // ≈ 123
     
     // 🌱 Minimo PURO: φ⁴ ≈ 7 barre (sotto questo non ha senso statistico)
     int minBarsForAnalysis = (int)MathRound(PHI_SQ * PHI_SQ);  // ≈ 6.85 → 7
     
-    if (barsAvailable < minBarsForAnalysis) {
-        PrintFormat("❌ [NATURAL] TF %s: solo %d barre disponibili, minimo richiesto %d - TF DISABILITATO", 
-            EnumToString(tf), barsAvailable, minBarsForAnalysis);
+    // 🔧 FIX: Usa CopyRates DIRETTAMENTE per caricare dati storici
+    // In backtest, questo forza MT5 a caricare i dati dal passato!
+    // Usiamo start=1 (barra precedente) per evitare la barra corrente incompleta
+    int copied = CopyRates(_Symbol, tf, 1, barsToRequest, rates);
+    
+    if (copied < minBarsForAnalysis) {
+        PrintFormat("❌ [NATURAL] TF %s: copiate solo %d barre storiche, minimo richiesto %d - TF DISABILITATO", 
+            EnumToString(tf), copied, minBarsForAnalysis);
         return result;  // valid = false
     }
+    
+    // 🔧 FIX: barsAvailable = numero EFFETTIVO di barre copiate (non Bars()!)
+    int barsAvailable = copied;
     
     // 🌱 maxLag = barre / φ² (proporzione aurea delle barre disponibili)
     // Questo assicura sempre abbastanza dati per l'analisi
     int maxLag = (int)MathRound(barsAvailable / PHI_SQ);
     maxLag = MathMax((int)MathRound(PHI_SQ), maxLag);  // Minimo φ² ≈ 3 per analisi sensata
     
-    // barsNeeded = maxLag × φ (per overlap statistico)
-    int barsNeeded = (int)MathRound(maxLag * PHI);
-    barsNeeded = MathMin(barsNeeded, barsAvailable);  // Non chiedere più di quanto disponibile
+    // Log solo la prima volta per confermare che i dati storici sono caricati
+    static bool loggedOnce_M5 = false, loggedOnce_H1 = false, loggedOnce_H4 = false, loggedOnce_D1 = false;
+    bool shouldLog = false;
     
-    int copied = CopyRates(_Symbol, tf, 0, barsNeeded, rates);
-    if (copied < maxLag) {
-        PrintFormat("❌ [NATURAL] TF %s: copiate solo %d barre su %d richieste - TF DISABILITATO", 
-            EnumToString(tf), copied, maxLag);
-        return result;
+    if (tf == PERIOD_M5 && !loggedOnce_M5) { shouldLog = true; loggedOnce_M5 = true; }
+    else if (tf == PERIOD_H1 && !loggedOnce_H1) { shouldLog = true; loggedOnce_H1 = true; }
+    else if (tf == PERIOD_H4 && !loggedOnce_H4) { shouldLog = true; loggedOnce_H4 = true; }
+    else if (tf == PERIOD_D1 && !loggedOnce_D1) { shouldLog = true; loggedOnce_D1 = true; }
+    
+    if (shouldLog) {
+        PrintFormat("[NATURAL] ✅ TF %s: Caricati %d/%d barre storiche (maxLag=%d)", 
+            EnumToString(tf), copied, barsToRequest, maxLag);
     }
-    
-    // Ricalcola maxLag basandosi sulle barre EFFETTIVE copiate
-    maxLag = (int)MathRound(copied / PHI_SQ);
-    maxLag = MathMax((int)MathRound(PHI_SQ), maxLag);
     
     // ═══════════════════════════════════════════════════════════════
     // CALCOLO AUTOCORRELAZIONE
@@ -2863,6 +2878,16 @@ void OnDeinit(const int reason)
         Print("[DEINIT] 📊 Nessun trade eseguito in questa sessione");
     }
     
+    // ═══════════════════════════════════════════════════════════════
+    // 📊 EXPORT TRADES PER MONTE CARLO ANALYSIS
+    // ═══════════════════════════════════════════════════════════════
+    if (ExportTradesCSV) {
+        Print("[DEINIT] 📊 Avvio esportazione trade CSV...");
+        ExportTradesToCSV();
+    } else {
+        Print("[DEINIT] 📊 Export CSV disabilitato (ExportTradesCSV=false)");
+    }
+    
     EventKillTimer();
     if (g_enableLogsEffective) Print("[DEINIT] ⏱️ Timer terminato");
     
@@ -2931,6 +2956,281 @@ void OnDeinit(const int reason)
         PrintFormat("[DEINIT-BUFFER] 🧹 g_tradeScoreHistory liberato: %d elementi → 0 %s",
             tradeScoreSize, ArraySize(g_tradeScoreHistory) == 0 ? "✅" : "❌");
         Print("[DEINIT] ✅ EA terminato correttamente");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 📊 EXPORT TRADES TO CSV - Per analisi Monte Carlo                |
+//| Esporta tutti i trade chiusi in formato CSV per Python           |
+//| ✅ Funziona sia in LIVE che in BACKTEST                          |
+//+------------------------------------------------------------------+
+void ExportTradesToCSV()
+{
+    bool isTester = MQLInfoInteger(MQL_TESTER) != 0;
+    Print(isTester ? "[EXPORT] 📊 Modalità BACKTEST" : "[EXPORT] 📊 Modalità LIVE");
+    
+    // Per backtest: usa 0 come data iniziale per prendere TUTTO lo storico
+    // Per live: usa g_eaStartTime  
+    datetime startTime = isTester ? 0 : g_eaStartTime;
+    datetime endTime = TimeCurrent();
+    
+    // Nel tester, TimeCurrent() potrebbe essere la data finale del test
+    // Assicuriamoci di prendere tutto
+    if (isTester) {
+        endTime = D'2099.12.31';  // Data futura per prendere tutto
+    }
+    
+    if (!HistorySelect(startTime, endTime)) {
+        Print("[EXPORT] ❌ Impossibile accedere allo storico trade - HistorySelect failed");
+        return;
+    }
+    
+    int totalDeals = HistoryDealsTotal();
+    PrintFormat("[EXPORT] 📊 HistoryDealsTotal = %d", totalDeals);
+    if (totalDeals == 0) {
+        Print("[EXPORT] ⚠️ Nessun deal nello storico - nessun file creato");
+        return;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // PRIMA PASSA: Conta i trade validi e calcola balance iniziale
+    // ═══════════════════════════════════════════════════════════════
+    int validTradeCount = 0;
+    double totalPL = 0;
+    
+    for (int i = 0; i < totalDeals; i++) {
+        ulong dealTicket = HistoryDealGetTicket(i);
+        if (dealTicket == 0) continue;
+        
+        // Filtra solo deal del nostro EA (o tutti se magic = 0 nel tester)
+        long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+        if (!isTester && MagicNumber != 0 && dealMagic != g_uniqueMagicNumber && dealMagic != MagicNumber) continue;
+        
+        // Filtra solo deal di uscita
+        ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+        if (dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_INOUT) continue;
+        
+        // Solo deal dello stesso simbolo
+        string dealSymbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+        if (dealSymbol != _Symbol) continue;
+        
+        validTradeCount++;
+        totalPL += HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                 + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION)
+                 + HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+    }
+    
+    if (validTradeCount == 0) {
+        Print("[EXPORT] ⚠️ Nessun trade valido trovato per questo simbolo/EA");
+        return;
+    }
+    
+    // Calcola balance iniziale
+    double finalBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double startBalance = finalBalance - totalPL;
+    double runningBalance = startBalance;
+    
+    // ═══════════════════════════════════════════════════════════════
+    // GENERA NOME FILE
+    // ═══════════════════════════════════════════════════════════════
+    string symbolClean = _Symbol;
+    StringReplace(symbolClean, "/", "");
+    StringReplace(symbolClean, "\\", "");
+    StringReplace(symbolClean, ".", "");
+    StringReplace(symbolClean, "#", "");
+    
+    // Usa data corrente per live, data fine test per backtest
+    string dateStr = TimeToString(TimeCurrent(), TIME_DATE);
+    StringReplace(dateStr, ".", "-");
+    
+    // Aggiungi suffisso per distinguere backtest da live
+    string suffix = isTester ? "_backtest" : "_live";
+    string filename = StringFormat("trades_%s_%s%s.csv", symbolClean, dateStr, suffix);
+    
+    // ═══════════════════════════════════════════════════════════════
+    // APRI FILE - Usa FILE_COMMON per accessibilità
+    // ═══════════════════════════════════════════════════════════════
+    // FILE_COMMON salva in: C:\Users\[User]\AppData\Roaming\MetaQuotes\Terminal\Common\Files
+    // Questo è accessibile sia da live che da tester
+    int fileHandle = FileOpen(filename, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ';');
+    
+    if (fileHandle == INVALID_HANDLE) {
+        // Fallback: prova senza FILE_COMMON
+        fileHandle = FileOpen(filename, FILE_WRITE|FILE_CSV|FILE_ANSI, ';');
+        if (fileHandle == INVALID_HANDLE) {
+            PrintFormat("[EXPORT] ❌ Impossibile creare file: %s (Errore: %d)", filename, GetLastError());
+            return;
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════
+    // SCRIVI HEADER CSV (compatibile con montecarlo_analyzer.py)
+    // ═══════════════════════════════════════════════════════════════
+    FileWrite(fileHandle, 
+        "Ticket", "OpenTime", "CloseTime", "Type", "Symbol", "Volume", 
+        "OpenPrice", "ClosePrice", "Commission", "Swap", "Profit", 
+        "NetProfit", "Balance", "Duration_Minutes", "MagicNumber", "Comment");
+    
+    int exportedCount = 0;
+    
+    // ═══════════════════════════════════════════════════════════════
+    // SECONDA PASSA: Esporta i trade con tutti i dettagli
+    // ═══════════════════════════════════════════════════════════════
+    for (int i = 0; i < totalDeals; i++) {
+        ulong dealTicket = HistoryDealGetTicket(i);
+        if (dealTicket == 0) continue;
+        
+        // Filtra solo deal del nostro EA
+        long dealMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+        if (!isTester && MagicNumber != 0 && dealMagic != g_uniqueMagicNumber && dealMagic != MagicNumber) continue;
+        
+        // Filtra solo chiusure (DEAL_ENTRY_OUT) - ignora aperture
+        ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+        if (dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_INOUT) continue;
+        
+        // Solo deal dello stesso simbolo
+        string dealSymbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+        if (dealSymbol != _Symbol) continue;
+        
+        // Estrai dati del deal di chiusura
+        datetime closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+        ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+        double volume = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+        double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+        double commission = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+        double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+        double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+        string comment = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+        
+        // Sanitizza il comment per evitare problemi con il separatore CSV
+        StringReplace(comment, ";", ",");  // Sostituisce ; con , per evitare problemi CSV
+        StringReplace(comment, "\n", " "); // Rimuovi newline
+        StringReplace(comment, "\r", " "); // Rimuovi carriage return
+        
+        // Trova il deal di APERTURA per questa posizione
+        long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+        double openPrice = closePrice;  // Fallback: usa closePrice se non troviamo apertura
+        datetime openTime = closeTime;  // Fallback: usa closeTime se non troviamo apertura
+        ENUM_DEAL_TYPE openDealType = DEAL_TYPE_BUY;
+        bool foundOpenDeal = false;
+        
+        for (int j = 0; j < i; j++) {
+            ulong openDealTicket = HistoryDealGetTicket(j);
+            if (openDealTicket == 0) continue;
+            
+            if (HistoryDealGetInteger(openDealTicket, DEAL_POSITION_ID) == positionId) {
+                ENUM_DEAL_ENTRY openEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(openDealTicket, DEAL_ENTRY);
+                if (openEntry == DEAL_ENTRY_IN) {
+                    openPrice = HistoryDealGetDouble(openDealTicket, DEAL_PRICE);
+                    openTime = (datetime)HistoryDealGetInteger(openDealTicket, DEAL_TIME);
+                    openDealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(openDealTicket, DEAL_TYPE);
+                    // Aggiungi commissione di apertura SOLO se presente e non già inclusa
+                    double openCommission = HistoryDealGetDouble(openDealTicket, DEAL_COMMISSION);
+                    if (MathAbs(openCommission) > 0.0001) {
+                        commission += openCommission;
+                    }
+                    foundOpenDeal = true;
+                    break;
+                }
+            }
+        }
+        
+        // Se non abbiamo trovato il deal di apertura, determina tipo dalla chiusura
+        if (!foundOpenDeal) {
+            // Se chiude con SELL, era un BUY. Se chiude con BUY, era un SELL
+            openDealType = (dealType == DEAL_TYPE_SELL) ? DEAL_TYPE_BUY : DEAL_TYPE_SELL;
+        }
+        
+        // Calcola durata trade in minuti
+        int durationMinutes = (openTime > 0) ? (int)((closeTime - openTime) / 60) : 0;
+        
+        // Il TIPO della posizione è quello del deal di APERTURA (non chiusura!)
+        string typeStr = (openDealType == DEAL_TYPE_BUY) ? "Buy" : "Sell";
+        
+        // Calcola profitto netto (profit + commission + swap)
+        double netProfit = profit + commission + swap;
+        
+        // Aggiorna balance running
+        runningBalance += netProfit;
+        
+        // Formatta i numeri con punto decimale fisso (evita problemi con locale)
+        // NormalizeDouble assicura precisione, poi formattiamo manualmente
+        int symbolDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+        
+        string volStr = DoubleToString(volume, 2);
+        string openPriceStr = DoubleToString(openPrice, symbolDigits);
+        string closePriceStr = DoubleToString(closePrice, symbolDigits);
+        string commStr = DoubleToString(commission, 2);
+        string swapStr = DoubleToString(swap, 2);
+        string profitStr = DoubleToString(profit, 2);
+        string netProfitStr = DoubleToString(netProfit, 2);
+        string balanceStr = DoubleToString(runningBalance, 2);
+        
+        // Forza il punto decimale (alcuni locale usano virgola)
+        StringReplace(volStr, ",", ".");
+        StringReplace(openPriceStr, ",", ".");
+        StringReplace(closePriceStr, ",", ".");
+        StringReplace(commStr, ",", ".");
+        StringReplace(swapStr, ",", ".");
+        StringReplace(profitStr, ",", ".");
+        StringReplace(netProfitStr, ",", ".");
+        StringReplace(balanceStr, ",", ".");
+        
+        // Scrivi riga CSV
+        FileWrite(fileHandle,
+            IntegerToString(dealTicket),                                          // Ticket
+            TimeToString(openTime, TIME_DATE|TIME_SECONDS),                       // OpenTime
+            TimeToString(closeTime, TIME_DATE|TIME_SECONDS),                      // CloseTime
+            typeStr,                                                              // Type
+            dealSymbol,                                                           // Symbol
+            volStr,                                                               // Volume
+            openPriceStr,                                                         // OpenPrice
+            closePriceStr,                                                        // ClosePrice
+            commStr,                                                              // Commission
+            swapStr,                                                              // Swap
+            profitStr,                                                            // Profit (lordo)
+            netProfitStr,                                                         // NetProfit (netto)
+            balanceStr,                                                           // Balance
+            IntegerToString(durationMinutes),                                     // Duration
+            IntegerToString(dealMagic),                                           // MagicNumber
+            comment);                                                             // Comment
+        
+        exportedCount++;
+    }
+    
+    FileClose(fileHandle);
+    
+    // ═══════════════════════════════════════════════════════════════
+    // STAMPA RISULTATO
+    // ═══════════════════════════════════════════════════════════════
+    if (exportedCount > 0) {
+        string commonPath = TerminalInfoString(TERMINAL_COMMONDATA_PATH) + "\\Files\\" + filename;
+        string localPath = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\" + filename;
+        
+        Print("");
+        Print("╔═══════════════════════════════════════════════════════════════════════════╗");
+        Print("║              📊 EXPORT TRADE COMPLETATO PER MONTE CARLO                    ║");
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ Trade esportati: %d", exportedCount);
+        PrintFormat("║ Balance iniziale: %.2f → Balance finale: %.2f", startBalance, runningBalance);
+        PrintFormat("║ Profitto totale: %+.2f", totalPL);
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        PrintFormat("║ File: %s", filename);
+        if (isTester) {
+            Print("║ 📂 BACKTEST - File salvato in:");
+            PrintFormat("║    %s", commonPath);
+        } else {
+            Print("║ 📂 LIVE - File salvato in:");
+            PrintFormat("║    %s", localPath);
+        }
+        Print("╠═══════════════════════════════════════════════════════════════════════════╣");
+        Print("║ 💡 Per analisi Monte Carlo:                                                ║");
+        Print("║    1. Copia il file nella cartella montecarlo/                             ║");
+        Print("║    2. Esegui: python example_usage.py                                      ║");
+        Print("╚═══════════════════════════════════════════════════════════════════════════╝");
+        Print("");
+    } else {
+        Print("[EXPORT] ⚠️ Nessun trade esportato");
     }
 }
 
@@ -3294,22 +3594,19 @@ bool UpdateLastBar(ENUM_TIMEFRAMES tf, TimeFrameData &data)
 
 //+------------------------------------------------------------------+
 //| 🌱 Caricamento dati timeframe con calcolo valori organici        |
-//| 🔧 FIX: Validazione integrità dati storici                        |
+//| 🔧 FIX: Usa start=1 per caricare dati STORICI (passato)          |
 //+------------------------------------------------------------------+
 bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
 {
-    // Ottieni dati di prezzo
-    int copiedBars = CopyRates(_Symbol, tf, 0, bars, data.rates);
+    // 🔧 FIX: Usa start=1 per garantire dati dal passato, non dalla barra corrente incompleta
+    int copiedBars = CopyRates(_Symbol, tf, 1, bars, data.rates);
     if (copiedBars <= 0) {
         PrintFormat("[ERROR] Impossibile caricare rates per TF %s", EnumToString(tf));
         return false;
     }
     
-    // 🔧 FIX: Validazione integrità dati storici
-    if (copiedBars < bars / 2) {
-        PrintFormat("[⚠️ WARN] TF %s: Dati parziali (%d/%d barre) - qualità analisi ridotta",
-            EnumToString(tf), copiedBars, bars);
-    }
+    // 🔧 FIX: Non più warning "dati parziali" - ora usiamo quello che c'è
+    // Se servono N barre e ne abbiamo M < N, usiamo M (il sistema si adatta)
     
     // 🔧 FIX: Verifica che i dati non siano corrotti (prezzi validi)
     // 🌱 Numero barre da verificare = round(φ³) ≈ 4 (derivato da φ)
@@ -4170,6 +4467,17 @@ void OnTick()
     // 🌱 Minimo organico = φ⁸ ≈ 47 (derivato da potenza di φ)
     int minBarsOrganic = (int)MathRound(PHI_SQ * PHI_SQ * PHI_SQ * PHI_SQ);  // φ⁸ ≈ 46.98
     barsToLoad = MathMax(barsToLoad, minBarsOrganic);
+    // 🔧 FIX: Limite massimo ragionevole per evitare richieste assurde
+    // φ¹² ≈ 322 è un limite sensato per analisi tecnica
+    int maxBarsLimit = (int)MathRound(MathPow(PHI, 12));  // ≈ 322
+    if (barsToLoad > maxBarsLimit) {
+        static bool warnedOnce = false;
+        if (!warnedOnce) {
+            PrintFormat("[DATA] ⚠️ barsToLoad ridotto da %d a %d (limite φ¹²)", barsToLoad, maxBarsLimit);
+            warnedOnce = true;
+        }
+        barsToLoad = maxBarsLimit;
+    }
     
     // 🚀 USA CACHE O RICARICA
     bool m5Loaded = true, h1Loaded = true, h4Loaded = true, d1Loaded = true;
@@ -4359,9 +4667,14 @@ void ExecuteTradingLogic()
     // 🌱 FILTRO HURST NO-TRADE ZONE
     // Se il mercato è in regime "random" (H ≈ centro storico), i segnali sono rumore
     // Blocca nuovi trade ma permette gestione posizioni esistenti
+    // 🔧 FIX: Log solo se c'era un segnale valido da bloccare
     // ═══════════════════════════════════════════════════════════════
     if (!IsTradeAllowedByHurst()) {
-        if (g_enableLogsEffective) Print("[TRADE] ⛔ BLOCCATO da filtro Hurst - mercato in regime random");
+        // 🔧 FIX: Log solo se c'è un segnale reale (BUY/SELL) che viene bloccato
+        if (voteResult != 0 && g_enableLogsEffective) {
+            PrintFormat("[HURST] ⛔ TRADE %s BLOCCATO - TradeScore=%.3f < %.3f (soglia)", 
+                voteResult == 1 ? "BUY" : "SELL", g_hurstTradeScore, g_tradeScoreThreshold);
+        }
         return;
     }
     
@@ -4374,9 +4687,7 @@ void ExecuteTradingLogic()
         if (g_enableLogsEffective) Print("[TRADE] 🟢 SEGNALE BUY CONFERMATO - Apertura ordine...");
         OpenBuyOrder();
     }
-    else {
-        if (g_enableLogsEffective) Print("[TRADE] ⚪ Nessun segnale - in attesa...");
-    }
+    // 🔧 FIX: Rimosso log "Nessun segnale - in attesa..." - troppo verboso (ogni 5 min)
 }
 
 //+------------------------------------------------------------------+
