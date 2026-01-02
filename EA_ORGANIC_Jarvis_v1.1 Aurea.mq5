@@ -1,57 +1,51 @@
 ﻿//+------------------------------------------------------------------+
 //| --------------------------------------------------------------- |
-//| SISTEMA 100% ORGANICO - TUTTO DERIVATO DAI DATI                 |
+//| ?? SISTEMA 100% ORGANICO - TUTTO DERIVATO DAI DATI              
 //| --------------------------------------------------------------- |
 //|                                                                 |
-//| SCALE DINAMICHE BASATE SU HURST (2^H):                          |
-//|   - NESSUNA costante a priori - tutto dai DATI                  |
-//|   - Scale = 2^H dove H = Esponente di Hurst empirico            |
-//|   - H=0.5 -> 2^0.5 ~ 1.414 (random walk)                        |
-//|   - H=0.7 -> 2^0.7 ~ 1.625 (trending)                           |
-//|   - H=0.3 -> 2^0.3 ~ 1.231 (mean-reverting)                     |
+//| COSTANTI MATEMATICHE (solo f = Rapporto Aureo � 1.618):         |
+//|   f = (1+v5)/2 | 1/f � 0.618 | 1/f� � 0.382 | 1/f� � 0.236      |
+//|   f � usato SOLO come fattore di scala, non come valore fisso   |
 //|                                                                 |
 //| FORMULA PERIODI (100% data-driven):                             |
 //|   naturalPeriod = autocorrelazione dei DATI (no minuti!)        |
-//|   scale = 2^H (derivato dall'Esponente di Hurst)                |
-//|   decay = 2^(-H) = 1/scale                                      |
-//|   periodi_indicatori = naturalPeriod x potenze di scale         |
+//|   periodi_indicatori = naturalPeriod � potenze di f             |
 //|                                                                 |
 //| FORMULA PESI TF (Esponente di Hurst):                           |
-//|   peso_TF = H_TF / Sum(H_tutti_TF)                              |
-//|   H > centro: trending -> peso maggiore                         |
+//|   peso_TF = H_TF / S(H_tutti_TF)                                |
+//|   H > centro: trending ? peso maggiore                          |
 //|   H derivato con metodo R/S (Rescaled Range)                    |
 //|                                                                 |
-//| CENTRI ADATTIVI HURST-DRIVEN con Smoothing:                     |
-//|   TRENDING (H>0.55):     EMA (dati recenti pesano di piu)       |
-//|   RANDOM (0.45-0.55):    Mediana (robusto agli outlier)         |
-//|   REVERTING (H<0.45):    Trimmed Mean (centro oscillazione)     |
-//|   Transizioni: blend lineare per evitare discontinuita          |
+//| CENTRI E SCALE (100% empirici):                                 |
+//|   centro = mean(indicatore) calcolato sul cross                 |
+//|   scala = stdev(indicatore) � f (volatilit� reale)              |
 //|                                                                 |
 //| SOGLIE DINAMICHE:                                               |
-//|   ADX threshold = avg + decay x stddev (dai dati)               |
-//|   Score threshold = OTSU->YOUDEN (100% data-driven)             |
-//|   Zona Hurst = centro +/- stdev x decay (dai dati)              |
+//|   ADX threshold = avg + (1/φ) × stddev (dai dati)               |
+//|   Score threshold = OTSU→YOUDEN (100% data-driven)              |
+//|   Zona Hurst = centro ± stdev × φ⁻¹ (dai dati)                  |
 //|                                                                 |
 //| READY CHECK:                                                    |
-//|   L'EA NON entra a mercato finche non ha abbastanza dati        |
+//|   L'EA NON entra a mercato finch� non ha abbastanza dati        |
 //|   per calcolare TUTTI i valori organici (no fallback!)          |
 //|                                                                 |
 //| --------------------------------------------------------------- |
-//| VALIDAZIONI IMPLEMENTATE:                                       |
+//| ? VALIDAZIONI IMPLEMENTATE (cerca "? VALIDATO" nel codice):    |
 //| --------------------------------------------------------------- |
-//| 1. HURST EXPONENT: Range [0.1, 0.9] forzato in output           |
+//| 1. HURST EXPONENT: Range [f?�, 1-f?�] forzato in output         |
 //| 2. DIVISIONI: Tutte protette contro /0 con check denominatore   |
 //| 3. BUFFER CIRCOLARI: Indici sempre in [0, MAX-1] via modulo     |
 //| 4. SOMME INCREMENTALI: Sanity check per floating point errors   |
-//| 5. VARIANZA: Protezione sqrt(negativo) -> ritorna 0.0           |
-//| 6. SCORE THRESHOLD: Bounds P25 <-> P75 della distribuzione      |
+//| 5. VARIANZA: Protezione sqrt(negativo) → ritorna 0.0            |
+//| 6. SCORE THRESHOLD: Bounds P(φ⁻²) ↔ P(1-φ⁻³) della distribuzione|
 //| 7. CONFIDENCE: Output sempre in [0.0, 1.0]                      |
 //| 8. REGIME HURST: Sempre ritorna ENUM valida (default=RANDOM)    |
+//| --------------------------------------------------------------- |          |
 //| --------------------------------------------------------------- |
 //+------------------------------------------------------------------+
 #property copyright "Pietro Giacobazzi, Juri Corradi, Alessandro Brehas"
-#property version   "5.00"
-#property description "EA Jarvis - 🔬 SISTEMA 100% DATA-DRIVEN (Scale 2^H)"
+#property version   "4.00"
+#property description "EA Jarvis_INDICATORS CA__Pt MASTER (?? SISTEMA 100% ORGANICO - TUTTO DERIVATO DAI DATI)"
 
 #include <Trade\Trade.mqh>
 #include <Arrays\ArrayDouble.mqh>
@@ -107,7 +101,7 @@ int CalculateUniqueMagicNumber()
 int g_uniqueMagicNumber = 0;
 
 // +---------------------------------------------------------------------------+
-//                          PARAMETRI BUY                                   
+// �                         ?? PARAMETRI BUY                                   �
 // +---------------------------------------------------------------------------+
 input group "--- ?? ORDINI BUY ---"
 input double BuyLotSize           = 0.5;       // Lotto fisso per ordini BUY
@@ -118,7 +112,7 @@ input double TakeProfitPriceBuy   = 0.0;        // TP BUY prezzo fisso (priorit�
 input int    BuyTimeStopMinutes   = 7200;          // Stop loss temporale BUY (0=disattivato)
 
 // +---------------------------------------------------------------------------+
-//                           PARAMETRI SELL                                 
+// �                         ?? PARAMETRI SELL                                 �
 // +---------------------------------------------------------------------------+
 input group "--- ?? ORDINI SELL ---"
 input double SellLotSize          = 0.5;       // Lotto fisso per ordini SELL
@@ -129,7 +123,7 @@ input double TakeProfitPriceSell  = 0.0;        // TP SELL prezzo fisso (priorit
 input int    SellTimeStopMinutes  = 7200;          // Stop loss temporale SELL (0=disattivato)
 
 // +---------------------------------------------------------------------------+
-//                      TIMEFRAME & SISTEMA VOTO                            
+// �                    ?? TIMEFRAME & SISTEMA VOTO                            �
 // +---------------------------------------------------------------------------+
 input group "--- ?? TIMEFRAME ---"
 input bool   EnableIndicatorVoteSystem = true;  // Abilita sistema voti/pesi indicatori
@@ -171,39 +165,35 @@ struct OrganicPeriods {
     int atr;           // ATR period
     int adx;           // ADX period
     
-    // INDICATORI TREND AGGIUNTIVI (da v1.0)
-    double psar_step;  // PSAR step organico = decay^4
-    double psar_max;   // PSAR max organico = decay
-    int sma_fast;      // SMA veloce = naturalPeriod x scale
-    int sma_slow;      // SMA lenta = naturalPeriod × scale²
+    // ?? INDICATORI TREND AGGIUNTIVI (da v1.0)
+    double psar_step;  // PSAR step organico = f?4
+    double psar_max;   // PSAR max organico = f?�
+    int sma_fast;      // SMA veloce = naturalPeriod � f�
+    int sma_slow;      // SMA lenta = naturalPeriod � f4
     int ichimoku_tenkan;  // Tenkan-sen = naturalPeriod
-    int ichimoku_kijun;   // Kijun-sen = naturalPeriod × scale
-    int ichimoku_senkou;  // Senkou Span B = naturalPeriod × scale²
+    int ichimoku_kijun;   // Kijun-sen = naturalPeriod � f
+    int ichimoku_senkou;  // Senkou Span B = naturalPeriod � f�
     
-    // 🔬 INDICATORI MEAN-REVERSION (votano direzione inversione)
+    // ?? INDICATORI MEAN-REVERSION (votano direzione inversione)
     int stoch_k;          // Stochastic %K = naturalPeriod
-    int stoch_d;          // Stochastic %D = naturalPeriod × decay
-    int stoch_slowing;    // Slowing = round(scale) ≈ 2-3
+    int stoch_d;          // Stochastic %D = naturalPeriod � f?�
+    int stoch_slowing;    // Slowing = round(f�) � 3
     
     int min_bars_required; // Barre minime necessarie
     
-    // 🔬 PESO TF (calcolato da ESPONENTE DI HURST)
+    // ?? PESO TF (calcolato da ESPONENTE DI HURST)
     double weight;           // Peso del timeframe normalizzato
     double hurstExponent;    // Esponente di Hurst (0-1): H>centro=trending, H<centro=mean-reverting
     
-    // 🔬 SCALE DINAMICHE (derivate da Hurst)
-    double scale;            // 2^H - fattore di espansione
-    double decay;            // 2^(-H) - fattore di contrazione
-    
-    // 🔬 PERIODO NATURALE (derivato dall'autocorrelazione dei DATI)
-    // Questo è la BASE da cui derivano TUTTE le scale
+    // ?? PERIODO NATURALE (derivato dall'autocorrelazione dei DATI)
+    // Questo � la BASE da cui derivano TUTTE le scale
     int naturalPeriod; // Periodo naturale del mercato per questo TF
 };
 
 //--- Periodi organici per ogni timeframe (calcolati in OnInit)
 OrganicPeriods g_organic_M5, g_organic_H1, g_organic_H4, g_organic_D1;
 
-// 🌱 FIX: Periodi precedenti per rilevare cambi significativi (>25%)
+// 🌱 FIX: Periodi precedenti per rilevare cambi significativi (>φ⁻³ ≈ 23.6%)
 // Se i periodi cambiano drasticamente, gli handle indicatori devono essere ricreati
 OrganicPeriods g_prevOrganic_M5, g_prevOrganic_H1, g_prevOrganic_H4, g_prevOrganic_D1;
 bool g_periodsInitialized = false;  // Flag: primi periodi calcolati?
@@ -250,251 +240,118 @@ input bool   enableStoch     = true;    // Stochastic: zone estreme ? voto inver
 input bool   enableOBV       = true;    // OBV: divergenze volume/prezzo ? voto inversione
 
 // +---------------------------------------------------------------------------+
-// |              SISTEMA ORGANICO (Hurst & Soglie)                             |
+// �              ?? SISTEMA ORGANICO (Hurst & Soglie)                          �
+// �---------------------------------------------------------------------------�
+// � FILTRO HURST: Blocca trade quando H � centro storico (zona random)        �
+// � SOGLIA SCORE: Automatica = mean + stdev � f?� dai dati storici            �
+// � MEAN-REVERSION: RSI/Stoch/OBV votano nella direzione dell'inversione      �
 // +---------------------------------------------------------------------------+
-// | FILTRO HURST: Blocca trade quando H in centro storico (zona random)       |
-// | SOGLIA SCORE: Automatica = mean + stdev * decay dai dati storici          |
-// | MEAN-REVERSION: RSI/Stoch/OBV votano nella direzione dell'inversione      |
-// +---------------------------------------------------------------------------+
-input group "--- SISTEMA ORGANICO ---"
+input group "--- ?? SISTEMA ORGANICO ---"
 input bool   EnableHurstFilter  = true;         // Abilita filtro no-trade zone (H in zona random)
 input bool   AutoScoreThreshold = true;         // Soglia automatica (true) o manuale (false)
-input double ScoreThreshold     = 50.0;         // 🔬 Soglia manuale (50% = mediana) - solo se Auto=false
+input double ScoreThreshold     = 61.8;         // ?? Soglia manuale (f?� � 100) - solo se Auto=false
 
-input group "--- ⚡ PERFORMANCE BACKTEST ---"
-input int    RecalcEveryBars    = 200;            // 🔄 Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
+input group "--- ? PERFORMANCE BACKTEST ---"
+input int    RecalcEveryBars    = 200;            // ?? Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
 
 // -------------------------------------------------------------------------------
-// 🔬 SISTEMA SCALE DINAMICHE 2^H - 100% DATA-DRIVEN
+// ?? COSTANTI MATEMATICHE ORGANICHE - Derivate dalla natura, non arbitrarie
 // -------------------------------------------------------------------------------
-// NESSUNA costante matematica a priori - tutto derivato da 2^H!
-// Le scale sono DERIVATE dall'Esponente di Hurst del mercato stesso.
-//
-// FORMULA SCALE:
-//   scale(H) = 2^H     dove H = Esponente di Hurst empirico
-//   decay(H) = 2^(-H)  = 1/scale(H)
-//
-// PROPRIETÀ:
-//   H = 0.5 (random walk)   → scale = √2 ≈ 1.414, decay ≈ 0.707
-//   H = 0.6 (leggero trend) → scale ≈ 1.516, decay ≈ 0.660
-//   H = 0.7 (trending)      → scale ≈ 1.625, decay ≈ 0.616
-//   H = 0.4 (mean-reverting)→ scale ≈ 1.320, decay ≈ 0.758
-//   H = 0.3 (forte MR)      → scale ≈ 1.231, decay ≈ 0.812
-//
-// 100% DATA-DRIVEN: scale e decay derivati direttamente da 2^H
-// dove H = Esponente di Hurst calcolato empiricamente dai dati
-// -------------------------------------------------------------------------------
+// Rapporto Aureo: f = (1 + v5) / 2 � 1.618 - base universale della natura
+const double PHI = (1.0 + MathSqrt(5.0)) / 2.0;  // � 1.618033988749895
+const double PHI_INV = 1.0 / PHI;                 // � 0.618033988749895 (1/f)
+const double PHI_SQ = PHI * PHI;                  // � 2.618033988749895 (f�)
+const double PHI_INV_SQ = PHI_INV * PHI_INV;      // � 0.381966011250105 (1/f�)
+const double PHI_INV_CUB = PHI_INV_SQ * PHI_INV;  // � 0.236067977499790 (1/f�)
 
-// 🔬 COSTANTI MINIME DI FALLBACK (usate SOLO in warmup)
-// Basate su √2 (random walk) come assunzione neutrale
-const double HURST_DEFAULT = 0.5;                         // H neutro (random walk)
-const double SCALE_DEFAULT = MathSqrt(2.0);               // 2^0.5 = √2 ≈ 1.414
-const double DECAY_DEFAULT = 1.0 / MathSqrt(2.0);         // 2^(-0.5) ≈ 0.707
-
-// 🔬 NOTA: TUTTI I PERCENTILI ORA DERIVANO DA HURST!
-// Al posto di costanti statiche (0.25, 0.38, 0.62, 0.75), usiamo:
-//   - decay²(H) = 2^(-2H) ≈ 0.25 per H=0.5 (quartile inferiore)
-//   - decay(H) = 2^(-H) ≈ 0.62 per H=0.7 (quartile superiore)
-//   - 1-decay²(H) ≈ 0.75 per H=0.5 (complemento del quartile inferiore)
-// Questo rende il sistema 100% data-driven dall'esponente di Hurst
-
-// 🔬 PERIODI NATURALI DI DEFAULT (derivati dalla struttura temporale del mercato)
-// Questi valori iniziali sono basati sulla struttura del trading:
-// - Una sessione di trading = ~8-12 ore = ~12 barre M5 per ora di sessione
-// - Un giorno lavorativo = 24 ore = ~24 barre H1
-// - Una settimana = 5 giorni = ~30 barre H4, ~5 barre D1
-// Dopo il primo calcolo, vengono sostituiti dai valori empirici
-const int DEFAULT_PERIOD_M5 = 12;   // ~1 ora di trading (12 × 5min = 60min)
-const int DEFAULT_PERIOD_H1 = 24;   // ~1 giorno (24 ore)
-const int DEFAULT_PERIOD_H4 = 6;    // ~1 giorno (6 × 4h = 24h)
-const int DEFAULT_PERIOD_D1 = 5;    // ~1 settimana lavorativa
-
-// 🔬 Hurst medio globale (aggiornato dinamicamente)
-// Usato per calcolare scale quando TF non ha ancora H proprio
-// DICHIARATO QUI per essere disponibile alle funzioni GetBuffer*()
-double g_hurstGlobal = HURST_DEFAULT;                     // Media globale H di tutti i TF
-
-// 🔬 FUNZIONE: Calcola buffer size data-driven
-// Restituisce: periodo × scale^esponente(H)
-// USA g_hurstGlobal per adattarsi al regime di mercato corrente!
-int GetDataDrivenBufferSize(int basePeriod, double H, int exponent)
-{
-    double scale = MathPow(2.0, H);  // 2^H
-    double size = basePeriod * MathPow(scale, (double)exponent);
-    return MathMax(4, (int)MathRound(size));  // Minimo 4 per stabilità statistica
-}
-
-// 🔬 FUNZIONI DI UTILITÀ: Buffer size standard derivati da periodi naturali
-// Questi sostituiscono le vecchie costanti BUFFER_SIZE_*
-// ⚡ USANO g_hurstGlobal: buffer si adattano al regime di mercato!
-int GetBufferSmall()   { return GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, g_hurstGlobal, 0); }  // ~12 (H=0.5)
-int GetBufferMedium()  { return GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, g_hurstGlobal, 1); }  // ~17 (H=0.5)
-int GetBufferLarge()   { return GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 1); }  // ~34 (H=0.5)
-int GetBufferXLarge()  { return GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 2); }  // ~48 (H=0.5)
-int GetBufferHuge()    { return GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 3); }  // ~68 (H=0.5)
-
-// 🔬 RANGE HURST - Limiti statistici ragionevoli
-// Basati sulla teoria: H < 0.1 o H > 0.9 sono estremamente rari nei mercati reali
-const double HURST_RANGE_MIN = 0.1;                       // Minimo teorico
-const double HURST_RANGE_MAX = 0.9;                       // Massimo teorico
-
-// (g_hurstGlobal già dichiarato sopra alle funzioni GetBuffer*)
+// ?? RANGE HURST ORGANICO - Derivato da f
+// Limiti: [f?�, 1-f?�] � [0.236, 0.764]
+const double HURST_RANGE_MIN = PHI_INV_CUB;              // � 0.236
+const double HURST_RANGE_MAX = 1.0 - PHI_INV_CUB;        // � 0.764
 
 // ---------------------------------------------------------------------------
-// ⚡ OTTIMIZZAZIONE PERFORMANCE BACKTEST
+// ?? OTTIMIZZAZIONE PERFORMANCE BACKTEST
 // ---------------------------------------------------------------------------
 int    g_barsSinceLastRecalc = 0;           // Contatore barre dall'ultimo ricalcolo
 bool   g_isBacktest = false;                 // Flag: siamo in backtest?
 bool   g_enableLogsEffective = true;         // Log effettivi (auto-disabilitati in backtest)
 
-// 🔄 CACHE FLAGS (le variabili struct sono dichiarate dopo NaturalPeriodResult)
+// ?? CACHE FLAGS (le variabili struct sono dichiarate dopo NaturalPeriodResult)
 bool   g_cacheValid = false;                 // Cache valida?
 int    g_hurstRecalcCounter = 0;             // Contatore per ricalcolo Hurst
 bool   g_tfDataCacheValid = false;           // Cache dati TF valida?
 int    g_tfDataRecalcCounter = 0;            // Contatore per reload dati TF
 
-// 🔧 FIX: Variabili per rilevamento gap di prezzo e invalidazione cache
+// ?? FIX: Variabili per rilevamento gap di prezzo e invalidazione cache
 double g_lastCachePrice = 0.0;               // Ultimo prezzo quando cache valida
 double g_lastCacheATR = 0.0;                 // Ultimo ATR quando cache valida
 
-// 🔧 FIX: Warmup period - evita trading prima di stabilizzazione indicatori
+// ?? FIX: Warmup period - evita trading prima di stabilizzazione indicatori
 datetime g_eaStartTime = 0;                  // Timestamp avvio EA
 bool   g_warmupComplete = false;             // Flag: warmup completato?
 int    g_warmupBarsRequired = 0;             // Barre minime prima di tradare (calcolato in OnInit)
 
 // ---------------------------------------------------------------------------
-// 🔬 NOTA: Ora TUTTO è derivato da:
+// ?? NOTA: Ora TUTTO � derivato da:
 // 1. PERIODO NATURALE = autocorrelazione dei DATI (CalculateNaturalPeriodForTF)
-// 2. SCALE DINAMICHE = 2^H dove H = Esponente di Hurst empirico
-// 3. DECAY DINAMICO = 2^(-H) = 1/scale
+// 2. POTENZE DI f = MathPow(PHI, n) per le scale
+// 3. RAPPORTI AUREI = PHI, PHI_INV, PHI_SQ per i moltiplicatori
 //
-// Riferimento scale per vari H:
-// H=0.3 → scale=1.23, decay=0.81 | H=0.4 → scale=1.32, decay=0.76
-// H=0.5 → scale=1.41, decay=0.71 | H=0.6 → scale=1.52, decay=0.66
-// H=0.7 → scale=1.62, decay=0.62 | H=0.8 → scale=1.74, decay=0.57
+// Riferimento potenze di f:
+// f� � 1.618, f� � 2.618, f� � 4.236, f4 � 6.854, f5 � 11.09
+// f6 � 17.94, f7 � 29.03, f8 � 46.98, f? � 76.01, f�� � 122.99
+// f�� � 199.0, f�� � 322.0
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 🌱 SISTEMA PURO - NESSUN FALLBACK
+// ?? SISTEMA PURO - NESSUN FALLBACK
 // Se non abbiamo abbastanza dati per calcolare i centri empirici,
 // il timeframe viene DISABILITATO (isDataReady = false) e loggato l'errore.
 // Questo garantisce che OGNI decisione sia basata su dati REALI.
 // ---------------------------------------------------------------------------
 
-// 🔬 Struttura per ritornare periodo naturale E esponente di Hurst
+// ?? Struttura per ritornare periodo naturale E esponente di Hurst
 struct NaturalPeriodResult {
-    int period;              // Periodo naturale (lag dove autocorr < decay)
+    int period;              // Periodo naturale (lag dove autocorr < 1/f�)
     double hurstExponent;    // Esponente di Hurst (0-1): confrontato con g_hurstCenter
     bool valid;              // true se calcolo OK, false se dati insufficienti
 };
 
-// 🔬 CACHE PER RISULTATI HURST (dichiarata dopo la struct)
+// ?? CACHE PER RISULTATI HURST (dichiarata dopo la struct)
 NaturalPeriodResult g_cachedResult_M5, g_cachedResult_H1, g_cachedResult_H4, g_cachedResult_D1;
 
 //--- Oggetti trading e indicatori
 CTrade          trade;
 datetime        lastBarTime = 0;
-datetime        lastHurstRecalc = 0;  // 🔄 Ultimo ricalcolo Hurst
-
-//+------------------------------------------------------------------+
-//| 🔬 FUNZIONI HELPER: SCALE DINAMICHE BASATE SU 2^H                |
-//+------------------------------------------------------------------+
-
-// Calcola il fattore di scala dal Hurst exponent
-// scale(H) = 2^H
-// H = 0.5 → √2 ≈ 1.414 (random walk)
-// H = 0.7 → 2^0.7 ≈ 1.625 (trending)
-double GetOrganicScale(double H)
-{
-    // Clamp H al range valido [0.1, 0.9]
-    double h = MathMax(HURST_RANGE_MIN, MathMin(HURST_RANGE_MAX, H));
-    return MathPow(2.0, h);
-}
-
-// Calcola il fattore di decadimento dal Hurst exponent  
-// decay(H) = 2^(-H) = 1/scale(H)
-// H = 0.5 → 1/√2 ≈ 0.707 (random walk)
-// H = 0.7 → 2^(-0.7) ≈ 0.616 (trending)
-double GetOrganicDecay(double H)
-{
-    // Clamp H al range valido [0.1, 0.9]
-    double h = MathMax(HURST_RANGE_MIN, MathMin(HURST_RANGE_MAX, H));
-    return MathPow(2.0, -h);
-}
-
-// Calcola potenza n-esima della scala
-// scale^n(H) = 2^(n*H)
-// Utile per: scale² = 2^(2H), scale³ = 2^(3H), etc.
-double GetOrganicScalePow(double H, double n)
-{
-    double h = MathMax(HURST_RANGE_MIN, MathMin(HURST_RANGE_MAX, H));
-    return MathPow(2.0, n * h);
-}
-
-// Calcola potenza n-esima del decay
-// decay^n(H) = 2^(-n*H)
-// Utile per: decay² = 2^(-2H), decay³ = 2^(-3H), etc.
-double GetOrganicDecayPow(double H, double n)
-{
-    double h = MathMax(HURST_RANGE_MIN, MathMin(HURST_RANGE_MAX, H));
-    return MathPow(2.0, -n * h);
-}
-
-// Aggiorna l'Hurst globale come media ponderata di tutti i TF attivi
-void UpdateGlobalHurst()
-{
-    double sumH = 0.0;
-    int count = 0;
-    
-    if (g_dataReady_M5 && g_organic_M5.hurstExponent > 0) {
-        sumH += g_organic_M5.hurstExponent;
-        count++;
-    }
-    if (g_dataReady_H1 && g_organic_H1.hurstExponent > 0) {
-        sumH += g_organic_H1.hurstExponent;
-        count++;
-    }
-    if (g_dataReady_H4 && g_organic_H4.hurstExponent > 0) {
-        sumH += g_organic_H4.hurstExponent;
-        count++;
-    }
-    if (g_dataReady_D1 && g_organic_D1.hurstExponent > 0) {
-        sumH += g_organic_D1.hurstExponent;
-        count++;
-    }
-    
-    if (count > 0) {
-        g_hurstGlobal = sumH / count;
-    }
-    // Altrimenti mantiene il valore precedente o HURST_DEFAULT
-}
+datetime        lastHurstRecalc = 0;  // ?? Ultimo ricalcolo Hurst
 
 // ---------------------------------------------------------------------------
-// 🔬 FILTRO HURST NO-TRADE ZONE - 100% DATA-DRIVEN
+// ?? FILTRO HURST NO-TRADE ZONE - 100% DATA-DRIVEN
 // ---------------------------------------------------------------------------
-// Se il mercato è in regime "random" (H ≈ centro storico), i segnali sono rumore.
+// Se il mercato � in regime "random" (H � centro storico), i segnali sono rumore.
 // 
 // SOGLIE 100% DAI DATI STORICI:
 //   g_hurstCenter = media(H) storica del cross
-//   g_hurstZoneMargin = stdev(H) × decay (derivato da H stesso!)
+//   g_hurstZoneMargin = stdev(H) � f?�
 //   g_hurstRandomLow = centro - margine
 //   g_hurstRandomHigh = centro + margine
 //
 // REGIME (basato su soglie data-driven):
-//   H > g_hurstRandomHigh: TRENDING → trade permessi
-//   H < g_hurstRandomLow: MEAN-REVERTING → trade permessi  
-//   g_hurstRandomLow < H < g_hurstRandomHigh: RANDOM → NO TRADE
+//   H > g_hurstRandomHigh: TRENDING ? trade permessi
+//   H < g_hurstRandomLow: MEAN-REVERTING ? trade permessi  
+//   g_hurstRandomLow < H < g_hurstRandomHigh: RANDOM ? NO TRADE
 //
-// VOTING: tradeScore = |H - centro| × confidence, confrontato con soglia dinamica
+// VOTING: tradeScore = |H - centro| � confidence, confrontato con soglia dinamica
 // ---------------------------------------------------------------------------
 
-// 🔬 SOGLIE ZONA RANDOM 100% DATA-DRIVEN
+// Soglie organiche derivate da f
+// ?? SOGLIE ZONA RANDOM 100% DATA-DRIVEN
 // TUTTO derivato dai dati storici del cross:
 //   g_hurstCenter = media(H) storica
-//   g_hurstZoneMargin = stdev(H) × decay (data-driven!)
+//   g_hurstZoneMargin = stdev(H) � f?�
 //   zona_random = [g_hurstRandomLow, g_hurstRandomHigh]
 double g_hurstCenter = 0.0;                                   // Centro DINAMICO = media(H) storica
-double g_hurstZoneMargin = 0.0;                               // Margine = stdev(H) * decay(H)
+double g_hurstZoneMargin = 0.0;                               // Margine = stdev(H) � f?�
 double g_hurstRandomLow = 0.0;                                // centro - margine
 double g_hurstRandomHigh = 0.0;                               // centro + margine
 bool   g_hurstZoneReady = false;                              // True quando calcolato da dati
@@ -503,8 +360,8 @@ bool   g_hurstZoneReady = false;                              // True quando cal
 double g_hurstHistory[];                                      // Buffer H storici
 int g_hurstHistorySize = 0;                                   // Numero H memorizzati
 int g_hurstHistoryIndex = 0;                                  // Indice corrente (buffer circolare)
-// Dimensione buffer: potenza di 2 (calcolata dinamicamente)
-int HURST_HISTORY_MAX = 0;                                    // Calcolato in OnInit
+// ?? Dimensione buffer: f�� (calcolata dinamicamente)
+int HURST_HISTORY_MAX = 0;                                    // Calcolato in OnInit come round(f��)
 double g_hurstStdev = 0.0;                                    // Stdev storica di H
 
 // ?? SOMME INCREMENTALI per Hurst (O(1) invece di O(n))
@@ -516,8 +373,8 @@ int    g_hurstOperationCount = 0;                             // ?? FIX: Contato
 double g_tradeScoreHistory[];
 int    g_tradeScoreHistorySize = 0;
 int    g_tradeScoreHistoryIndex = 0;
-// Dimensione buffer: potenza di 2 (calcolata dinamicamente)
-int TRADE_SCORE_HISTORY_MAX = 0;                              // Calcolato in OnInit
+// ?? Dimensione buffer: f? (calcolata dinamicamente)
+int TRADE_SCORE_HISTORY_MAX = 0;                              // Calcolato in OnInit come round(f?)
 double g_tradeScoreThreshold = 0.0;                           // Soglia data-driven del tradeScore
 bool   g_tradeScoreReady = false;                             // True quando soglia calcolata dai dati
 
@@ -576,7 +433,7 @@ int g_recentTradesCount = 0;
 int g_recentTradesIndex = 0;
 
 // ---------------------------------------------------------------------------
-// v1.1: SOGLIA ADATTIVA OTSU -> YOUDEN
+// 🌱 v1.1: SOGLIA ADATTIVA OTSU → YOUDEN
 // Fase 1 (warm-up): Otsu - separazione bimodale degli score
 // Fase 2 (feedback): Youden - massimizza TPR + TNR - 1 basato su profitti
 // ---------------------------------------------------------------------------
@@ -584,9 +441,9 @@ double g_lastEntryScore = 0.0;            // Score % corrente (per nuovi trade)
 bool   g_youdenReady = false;             // True quando abbiamo abbastanza trade per Youden
 double g_youdenThreshold = 0.0;           // Soglia calcolata da Youden J
 double g_otsuThreshold = 0.0;             // Soglia calcolata da Otsu
-int    g_minTradesForYouden = 0;          // Minimo trade per passare a Youden (16)
+int    g_minTradesForYouden = 0;          // Minimo trade per passare a Youden (φ⁵ ≈ 11)
 
-// v1.1 FIX: Mappa ticket -> score per collegare correttamente score a trade
+// 🌱 v1.1 FIX: Mappa ticket → score per collegare correttamente score a trade
 // Problema: g_lastEntryScore veniva sovrascritto prima della chiusura trade
 // Soluzione: Array paralleli che mantengono score per ogni posizione aperta
 ulong  g_openTickets[];                   // Ticket delle posizioni aperte
@@ -612,19 +469,19 @@ bool g_hurstAllowTrade = true;           // Flag: trade permessi?
 bool g_hurstReady = false;               // True quando zona Hurst e soglia tradeScore sono da dati
 
 // ---------------------------------------------------------------------------
-// SOGLIA SCORE DINAMICA (derivata dalla distribuzione storica)
+// ?? SOGLIA SCORE DINAMICA (derivata dalla distribuzione storica)
 // ---------------------------------------------------------------------------
 // Buffer circolare per memorizzare gli ultimi N score
-// La soglia e calcolata come: mean(score) + stdev(score) * decay(H)
+// La soglia � calcolata come: mean(score) + stdev(score) � f?�
 // Questo rende la soglia adattiva al comportamento recente del mercato
 // ---------------------------------------------------------------------------
 double g_scoreHistory[];                 // Buffer score storici
 int g_scoreHistorySize = 0;              // Numero score memorizzati
 int g_scoreHistoryIndex = 0;             // Indice corrente (buffer circolare)
 double g_dynamicThreshold = 0.0;         // Soglia 100% data-driven (0 = non pronta)
-// Dimensione buffer: potenza di 2 (calcolata dinamicamente)
-int SCORE_HISTORY_MAX = 0;               // Calcolato in OnInit
-bool g_scoreThresholdReady = false;      // True quando la soglia auto e calcolata dai dati
+// ?? Dimensione buffer: f�� (calcolata dinamicamente)
+int SCORE_HISTORY_MAX = 0;               // Calcolato in OnInit come round(f��)
+bool g_scoreThresholdReady = false;      // True quando la soglia auto � calcolata dai dati
 
 // ?? SOMME INCREMENTALI per Score (O(1) invece di O(n))
 double g_scoreSum = 0.0;                 // S(score)
@@ -641,7 +498,7 @@ int    g_scoreOperationCount = 0;        // ?? FIX: Contatore operazioni per ric
 // Score Momentum: derivata dello score (segnale leading)
 double g_prevScore = 0.0;                // Score della barra precedente
 double g_scoreMomentum = 0.0;            // Cambio score: Score[t] - Score[t-1]
-double g_scoreMomentumThreshold = 0.0;   // Soglia momentum = stdev(momentum) * decay(H)
+double g_scoreMomentumThreshold = 0.0;   // Soglia momentum = stdev(momentum) � f?�
 double g_momentumHistory[];              // Buffer storico momentum per calcolo soglia
 int g_momentumHistorySize = 0;
 int g_momentumHistoryIndex = 0;
@@ -666,32 +523,33 @@ struct SwingPoint {
 };
 SwingPoint g_swings_H1[];                // Buffer swing points H1 (TF principale)
 int g_swingsSize_H1 = 0;                 // Numero swing memorizzati
-int g_swingsMax = 0;                     // Max swing = 16 (potenza di 2)
+int g_swingsMax = 0;                     // Max swing = round(f5) � 11
 int g_divergenceSignal = 0;              // +1=bullish div, -1=bearish div, 0=nessuna
 double g_divergenceStrength = 0.0;       // Forza divergenza (0-1)
 
-// 🔬 SOGLIA DIVERGENZA DATA-DRIVEN
+// ?? SOGLIA DIVERGENZA DATA-DRIVEN
 // Traccia storia forze divergenza per calcolare soglia minima
 double g_divergenceHistory[];            // Buffer storico forza divergenza
 int g_divergenceHistorySize = 0;         // Dimensione buffer
 int g_divergenceHistoryIndex = 0;        // Indice circolare
 double g_divergenceSum = 0.0;            // Somma incrementale (O(1))
 double g_divergenceSumSq = 0.0;          // Somma quadrati (O(1))
-double g_divergenceMinThreshold = 0.0;   // Soglia iniziale = 0, calcolata dai dati
+double g_divergenceMinThreshold = PHI_INV_CUB;  // ?? Soglia iniziale = f?� � 23.6%
 bool g_divergenceThresholdReady = false; // True quando calcolata dai dati
 
-// 🔬 SOGLIA REVERSAL DATA-DRIVEN
-// Tracciamo la storia della forza reversal e calcoliamo soglia data-driven
+// ?? SOGLIA REVERSAL DATA-DRIVEN
+// Invece di usare PHI_INV fisso, tracciamo la storia della forza reversal
+// e calcoliamo la soglia come: mean + stdev � f?�
 double g_reversalStrengthHistory[];      // Buffer storico forza reversal
 int g_reversalHistorySize = 0;           // Dimensione buffer
 int g_reversalHistoryIndex = 0;          // Indice circolare corrente
 double g_reversalSum = 0.0;              // Somma incrementale (O(1))
 double g_reversalSumSq = 0.0;            // Somma quadrati (O(1))
-double g_reversalThreshold = 0.0;        // Soglia iniziale = 0, calcolata dai dati
+double g_reversalThreshold = PHI_INV;    // ?? Soglia iniziale = f?� � 61.8%
 bool g_reversalThresholdReady = false;   // True quando soglia calcolata dai dati
 
-// 🔬 STOCHASTIC EXTREME DETECTION (ipercomprato/ipervenduto)
-// Soglie standard: ipervenduto < 25%, ipercomprato > 75%
+// ?? STOCHASTIC EXTREME DETECTION (ipercomprato/ipervenduto)
+// Soglie f-derivate: ipervenduto < f?��100 � 23.6, ipercomprato > (1-f?�)�100 � 76.4
 int g_stochExtremeSignal = 0;            // +1=ipervenduto (bullish reversal), -1=ipercomprato (bearish), 0=neutro
 double g_stochExtremeStrength = 0.0;     // Forza segnale (0-1)
 
@@ -741,37 +599,36 @@ struct TimeFrameData {
     double ichimoku_kijun[];    // Kijun-sen (base line)
     double ichimoku_senkou_a[]; // Senkou Span A
     double ichimoku_senkou_b[]; // Senkou Span B
-    // INDICATORI MEAN-REVERSION (votano inversione)
+    // ?? INDICATORI MEAN-REVERSION (votano inversione)
     double stoch_main[];    // Stochastic %K
     double stoch_signal[];  // Stochastic %D
     MqlRates rates[];
     
-    // Valori organici calcolati dinamicamente
+    // ?? Valori organici calcolati dinamicamente
     double atr_avg;         // Media ATR calcolata sulle ultime N barre
     double adx_avg;         // Media ADX calcolata sulle ultime N barre
     double adx_stddev;      // Deviazione standard ADX
-    double adx_threshold;   // Soglia ADX organica = avg + decay(H)*stddev
+    double adx_threshold;   // Soglia ADX organica = avg + (1/f)*stddev
     bool   isDataReady;     // Flag: abbastanza dati per calcoli organici
     
-    // CENTRI ADATTIVI HURST-DRIVEN - Calcolati da CalculateEmpiricalThresholds()
-    // Metodo varia in base al regime: EMA (trending), Mediana (random), TrimmedMean (reverting)
-    double rsi_center;      // Centro adattivo RSI ultime N barre
+    // ?? CENTRI EMPIRICI - Calcolati da CalculateEmpiricalThresholds()
+    double rsi_center;      // mean(RSI) ultime N barre
     
-    // SCALE EMPIRICHE - Derivate dalla volatilita dei dati
-    double rsi_scale;       // Stdev empirico RSI * scale(H)
-    double obv_scale;       // Stdev empirico variazioni OBV * scale(H)
+    // ?? SCALE EMPIRICHE - Derivate dalla volatilit� dei dati
+    double rsi_scale;       // Stdev empirico RSI � f
+    double obv_scale;       // ?? FIX: Stdev empirico variazioni OBV � f
     
-    // ADX PERCENTILI - Derivati dalla distribuzione storica
-    double adx_p25;         // 38esimo percentile ADX (range "basso")
-    double adx_p75;         // 62esimo percentile ADX (range "alto")
+    // ?? ADX PERCENTILI - Derivati dalla distribuzione storica
+    double adx_p25;         // f?� percentile ADX � 38� (range "basso")
+    double adx_p75;         // f?� percentile ADX � 62� (range "alto")
     
-    // Riferimento ai periodi organici del TF (impostato in LoadTimeFrameData)
+    // ?? Riferimento ai periodi organici del TF (impostato in LoadTimeFrameData)
     OrganicPeriods organic; // Periodi e peso organico del timeframe
 };
 
 TimeFrameData tfData_M5, tfData_H1, tfData_H4, tfData_D1;
 
-//--- Flag TF attivi (aggiornati ad ogni tick in base ai dati disponibili)
+//--- ?? Flag TF attivi (aggiornati ad ogni tick in base ai dati disponibili)
 bool g_vote_M5_active = false;
 bool g_vote_H1_active = false;
 bool g_vote_H4_active = false;
@@ -783,33 +640,30 @@ bool g_vote_D1_active = false;
 int OnInit()
 {
     // ---------------------------------------------------------------
-    // 🔬 STEP 0: INIZIALIZZAZIONE BUFFER (data-driven da Hurst)
-    // Dimensioni derivate da periodi naturali × scale^n(H)
-    // Con g_hurstGlobal = 0.5 (default): scale ≈ 1.41
+    // ?? STEP 0: INIZIALIZZAZIONE COSTANTI ORGANICHE (potenze di f)
+    // Tutte le dimensioni buffer sono calcolate dinamicamente da f
+    // f? � 76, f�� � 123, f�� � 322
     // ---------------------------------------------------------------
-    // TRADE_SCORE: GetBufferXLarge() = H1 × scale²(H) ≈ 48 (H=0.5)
-    TRADE_SCORE_HISTORY_MAX = GetBufferXLarge();    // ~48-68 a seconda di H
-    // HURST: GetBufferHuge() × 2 = H1 × scale³(H) × 2 ≈ 136 (H=0.5)
-    HURST_HISTORY_MAX = GetBufferHuge() * 2;        // ~136-200 a seconda di H
-    // SCORE: DEFAULT_PERIOD_H1 × scale⁴(H) ≈ 96 (H=0.5), × 2 ≈ 192
-    SCORE_HISTORY_MAX = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 4) * 2;  // ~192
+    TRADE_SCORE_HISTORY_MAX = (int)MathRound(MathPow(PHI, 9));   // f? � 76
+    HURST_HISTORY_MAX = (int)MathRound(MathPow(PHI, 10));        // f�� � 123
+    SCORE_HISTORY_MAX = (int)MathRound(MathPow(PHI, 12));        // f�� � 322
     
-    // 🔬 RILEVAMENTO BACKTEST E OTTIMIZZAZIONE AUTOMATICA
+    // ?? RILEVAMENTO BACKTEST E OTTIMIZZAZIONE AUTOMATICA
     g_isBacktest = (bool)MQLInfoInteger(MQL_TESTER);
     g_enableLogsEffective = EnableLogs && !g_isBacktest;
     g_barsSinceLastRecalc = 0;
     
     if (g_isBacktest) {
         Print("-----------------------------------------------------------------");
-        Print("⚡ BACKTEST MODE ATTIVO - Performance ottimizzata");
+        Print("? BACKTEST MODE ATTIVO - Performance ottimizzata");
         if (RecalcEveryBars > 0) {
             PrintFormat("   Ricalcolo organico: ogni %d barre (invece di ogni barra)", RecalcEveryBars);
             PrintFormat("   Speedup atteso: ~%dx rispetto al normale", RecalcEveryBars);
         } else {
             Print("   Ricalcolo organico: ogni barra (usa RecalcEveryBars>0 per velocizzare!)");
-            Print("   💡 CONSIGLIO: Imposta RecalcEveryBars=100 per backtest 50-100x più veloce");
+            Print("   ?? CONSIGLIO: Imposta RecalcEveryBars=100 per backtest 50-100x pi� veloce");
         }
-        Print("   🔬 Sistema: SCALE 2^H (100% data-driven, nessuna costante a priori)");
+        Print("   ?? Buffer Hurst: PRE-CARICATO da storia (trading subito!)");
         Print("   Log dettagliati: DISABILITATI automaticamente");
         Print("-----------------------------------------------------------------");
     }
@@ -818,8 +672,9 @@ int OnInit()
     
     // ?? CACHE COSTANTI SIMBOLO (evita chiamate API ripetute)
     g_pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    // 🌱 Fallback basato su convenzione mercato (dati empirici)
-    // Forex standard: 0.00001 (5 decimali), JPY/XAU: 0.01 (2-3 decimali)
+    // ?? Fallback organico: f?�� � 0.00001 (calcolato esattamente)
+    // f?�� = (f?6)� � f?5 = PHI_INV^23 � 0.0000106
+    // ?? FIX: Per coppie JPY (point ~0.01) il fallback � molto pi� grande
     if (g_pointValue <= 0) {
         // Determina se coppia JPY-like dal nome simbolo
         string upperSymbol = _Symbol;
@@ -827,7 +682,7 @@ int OnInit()
         if (StringFind(upperSymbol, "JPY") >= 0 || StringFind(upperSymbol, "XAU") >= 0) {
             g_pointValue = 0.01;  // Coppie JPY o Oro: point tipico 0.01
         } else {
-            g_pointValue = 0.00001;  // Forex standard: 5 decimali
+            g_pointValue = MathPow(PHI_INV, 23);  // ~0.00001 per forex standard
         }
     }
     
@@ -869,13 +724,13 @@ int OnInit()
     // ---------------------------------------------------------------
     // ?? STEP 2: CALCOLO PESI EMPIRICI (ESPONENTE DI HURST)
     // peso_TF = hurstExponent_TF / somma(hurstExponent)
-    // H > g_hurstRandomHigh: trending -> peso maggiore
-    // H in [g_hurstRandomLow, g_hurstRandomHigh]: random -> zona no-trade
-    // H < g_hurstRandomLow: mean-reverting -> peso maggiore
+    // H > g_hurstRandomHigh: trending ? peso maggiore
+    // H in [g_hurstRandomLow, g_hurstRandomHigh]: random ? zona no-trade
+    // H < g_hurstRandomLow: mean-reverting ? peso maggiore
     // 100% derivato dai DATI, non dai minuti del timeframe!
     // ---------------------------------------------------------------
     double totalHurst = 0;
-    // hurstExponent validato nel range [HURST_RANGE_MIN, HURST_RANGE_MAX]
+    // ? hurstExponent gi� validato nel range organico [f?�, 1-f?�] da CalculateNaturalPeriodForTF
     if (result_M5.valid) totalHurst += result_M5.hurstExponent;
     if (result_H1.valid) totalHurst += result_H1.hurstExponent;
     if (result_H4.valid) totalHurst += result_H4.hurstExponent;
@@ -962,19 +817,16 @@ int OnInit()
     // ---------------------------------------------------------------
     InitScoreHistoryBuffer();
     if (AutoScoreThreshold) {
-        // ✓ VALIDATO: minSamples derivato dal periodo naturale M5 × scale
-        int minSamplesOrganic = GetBufferSmall();  // ~12 campioni
-        // Percentuale buffer = decay²(H) (~25% per H=0.5, ~38% per H=0.7)
-        double bufferFraction = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
-        int minSamplesForInit = MathMax(minSamplesOrganic, (int)MathCeil(SCORE_HISTORY_MAX * bufferFraction));
+        // ? VALIDATO: minSamples derivato da f: f4 � 7 come minimo assoluto (ridotto per trading pi� veloce)
+        int minSamplesOrganic = (int)MathRound(MathPow(PHI, 4));  // f4 � 7
+        int minSamplesForInit = MathMax(minSamplesOrganic, (int)MathCeil(SCORE_HISTORY_MAX * PHI_INV_SQ * PHI_INV_SQ));
         Print("");
         Print("---------------------------------------------------------------");
         Print("?? SOGLIA SCORE 100% DERIVATA DAI DATI");
-        Print("   Formula: threshold = mean_score + stdev_score * decay(H)");
-        PrintFormat("   Buffer: %d campioni | Ready dopo %d campioni (~%d%% del buffer)", 
+        Print("   Formula: threshold = mean_score + stdev_score � f?�");
+        PrintFormat("   Buffer: %d campioni | Ready dopo %d campioni (~%d%% del buffer, f?4)", 
             SCORE_HISTORY_MAX, minSamplesForInit, (int)MathRound(100.0 * minSamplesForInit / SCORE_HISTORY_MAX));
-        double decayH2Log = GetOrganicDecayPow(HURST_DEFAULT, 2.0);  // ~0.25 per H=0.5
-        PrintFormat("   Limiti: [%.1f%%, %.1f%%] (decay² a 1-decay²)", decayH2Log * 100, (1.0 - decayH2Log) * 100);
+        PrintFormat("   Limiti: [%.1f%%, %.1f%%] (1/f� a 1-1/f�)", PHI_INV_CUB * 100, (1.0 - PHI_INV_CUB) * 100);
         Print("   ?? FIX: Minimo campioni ridotto per trading pi� veloce");
         Print("---------------------------------------------------------------");
         Print("");
@@ -984,7 +836,7 @@ int OnInit()
     
     // ---------------------------------------------------------------
     // ?? STEP 6: INIZIALIZZA BUFFER STORICO HURST
-    // Per calcolo zona random adattiva: centro +/- (stdev_H * decay(H))
+    // Per calcolo zona random adattiva: centro � (stdev_H � f?�)
     // ---------------------------------------------------------------
     InitHurstHistoryBuffer();
     
@@ -1004,9 +856,9 @@ int OnInit()
         PrintFormat("   Buffer Hurst: %d/%d campioni | Ready: %s", 
             g_hurstHistorySize, HURST_HISTORY_MAX, g_hurstZoneReady ? "?" : "?");
         PrintFormat("   Buffer TradeScore: %d campioni | Ready dopo ~%d campioni",
-            TRADE_SCORE_HISTORY_MAX, (int)MathCeil(TRADE_SCORE_HISTORY_MAX * GetOrganicDecayPow(HURST_DEFAULT, 2.0)));
-        Print("   Formula zona: centro = mean(H), margine = stdev(H) * decay(H)");
-        Print("   Formula soglia: mean(tradeScore) + stdev(tradeScore) * decay(H)");
+            TRADE_SCORE_HISTORY_MAX, (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ));
+        Print("   Formula zona: centro = mean(H), margine = stdev(H) � f?�");
+        Print("   Formula soglia: mean(tradeScore) + stdev(tradeScore) � f?�");
         Print("---------------------------------------------------------------");
         Print("");
     }
@@ -1058,32 +910,30 @@ int OnInit()
     PrintFormat("[INIT] ? %d indicatori TREND (votano) + %d MEAN-REVERSION (votano inversione)", 
         numTrendIndicators, numBlockIndicators);
     
-    // FIX: Salva periodi iniziali per rilevamento cambi futuri
+    // ?? FIX: Salva periodi iniziali per rilevamento cambi futuri
     SaveCurrentPeriodsAsPrevious();
     
-    // FIX: Inizializza warmup period
+    // ?? FIX: Inizializza warmup period
     g_eaStartTime = TimeCurrent();
     g_warmupComplete = false;
-    // Warmup = scale(H) * naturalPeriod più lungo disponibile
+    // 🌱 Warmup = φ² × naturalPeriod più lungo disponibile (minimo φ⁸ ≈ 47 barre)
     int longestPeriod = MathMax(MathMax(g_organic_M5.naturalPeriod, g_organic_H1.naturalPeriod),
                                 MathMax(g_organic_H4.naturalPeriod, g_organic_D1.naturalPeriod));
-    // Minimo warmup derivato dal periodo H1 (24 ore) × scale²
-    int minWarmupBars = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, HURST_DEFAULT, 2);  // ~48 per H=0.5
-    double warmupScale = GetOrganicScale(HURST_DEFAULT);  // ~1.41 per H=0.5
-    g_warmupBarsRequired = MathMax(minWarmupBars, (int)MathRound(longestPeriod * warmupScale));
+    int minWarmupBars = (int)MathRound(MathPow(PHI, 8));  // φ⁸ ≈ 47 (invece di 50 arbitrario)
+    g_warmupBarsRequired = MathMax(minWarmupBars, (int)MathRound(longestPeriod * PHI_SQ));
     PrintFormat("[INIT] ?? Warmup: %d barre richieste prima del trading", g_warmupBarsRequired);
     
     // ---------------------------------------------------------------
-    //  INIZIALIZZA STATISTICHE TRADING
+    // ?? INIZIALIZZA STATISTICHE TRADING
     // ---------------------------------------------------------------
     ZeroMemory(g_stats);
     g_stats.peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
     
-    // Buffer trade recenti = periodo H1 × scale² (~48 trade)
-    g_recentTradesMax = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, HURST_DEFAULT, 2);
+    // Buffer trade recenti = f8 ≈ 47
+    g_recentTradesMax = (int)MathRound(MathPow(PHI, 8));
     
     // 🌱 v1.1: Inizializza sistema Otsu → Youden
-    g_minTradesForYouden = GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, HURST_DEFAULT, 1);  // ~17 trade minimi
+    g_minTradesForYouden = (int)MathRound(MathPow(PHI, 5));  // φ⁵ ≈ 11 trade
     g_youdenReady = false;
     g_youdenThreshold = 0.0;
     g_otsuThreshold = 0.0;
@@ -1111,21 +961,20 @@ int OnInit()
     // 🌱 v1.1: Log sistema Otsu → Youden
     Print("");
     Print("---------------------------------------------------------------");
-    Print("SOGLIA ADATTIVA: OTSU -> YOUDEN (100% DATA-DRIVEN)");
+    Print("🌱 SOGLIA ADATTIVA: OTSU → YOUDEN (100% DATA-DRIVEN)");
     Print("---------------------------------------------------------------");
     PrintFormat("   Fase 1 (warm-up): OTSU - separazione bimodale score");
-    PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
-    double decayBounds = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
-    PrintFormat("   Bounds: P%.1f%% <-> P%.1f%% (data-driven da Hurst)", decayBounds * 100.0, (1.0 - decayBounds) * 100.0);
-    Print("   Tutti i parametri derivati da 2^H e DAI DATI");
+    PrintFormat("   Fase 2 (≥%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
+    PrintFormat("   Bounds: P%.1f%% ↔ P%.1f%% (φ-derivati)", PHI_INV_SQ * 100.0, (1.0 - PHI_INV_CUB) * 100.0);
+    Print("   Tutti i parametri derivati da φ e DAI DATI");
     Print("---------------------------------------------------------------");
     
     // ---------------------------------------------------------------
-    // RIEPILOGO STATO BUFFER - Trading pronto?
+    // 🔄 RIEPILOGO STATO BUFFER - Trading pronto?
     // ---------------------------------------------------------------
     Print("");
     Print("---------------------------------------------------------------");
-    Print("STATO BUFFER E PRONTEZZA TRADING");
+    Print("📊 STATO BUFFER E PRONTEZZA TRADING");
     Print("---------------------------------------------------------------");
     PrintFormat("   Buffer Hurst: %d/%d | Ready: %s", 
         g_hurstHistorySize, HURST_HISTORY_MAX, g_hurstZoneReady ? "?" : "?");
@@ -1158,36 +1007,36 @@ int OnInit()
 }
 
 //+------------------------------------------------------------------+
-//|  RICALCOLO COMPLETO: Periodi naturali, pesi, e periodi organici|
+//| ?? RICALCOLO COMPLETO: Periodi naturali, pesi, e periodi organici|
 //| Chiamato ad ogni nuova barra per adattarsi ai cambi di regime    |
-//|  OTTIMIZZATO: Usa cache per evitare ricalcoli costosi          |
+//| ?? OTTIMIZZATO: Usa cache per evitare ricalcoli costosi          |
 //+------------------------------------------------------------------+
 void RecalculateOrganicSystem()
 {
     // ---------------------------------------------------------------
-    //  FIX: RILEVAMENTO GAP DI PREZZO - Invalida cache se gap > ATR � f
+    // ? FIX: RILEVAMENTO GAP DI PREZZO - Invalida cache se gap > ATR � f
     // Questo garantisce che cambi di regime improvvisi vengano gestiti
     // ---------------------------------------------------------------
     double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     if (g_cacheValid && g_lastCachePrice > 0 && g_lastCacheATR > 0) {
         double priceChange = MathAbs(currentPrice - g_lastCachePrice);
-        double gapThreshold = g_lastCacheATR * GetOrganicScale(g_hurstGlobal);  // Gap = ATR * scale(H)
+        double gapThreshold = g_lastCacheATR * PHI;  // Gap = ATR � f
         
         if (priceChange > gapThreshold) {
             g_cacheValid = false;  // Invalida cache su gap
             if (g_enableLogsEffective) {
-                PrintFormat("[RECALC] 🌱 GAP rilevato: %.5f > %.5f (ATR*scale) - Cache invalidata", 
+                PrintFormat("[RECALC] ?? GAP rilevato: %.5f > %.5f (ATR�f) - Cache invalidata", 
                     priceChange, gapThreshold);
             }
         }
     }
     
     // ---------------------------------------------------------------
-    // 🌱 CHECK CACHE - Ricalcola Hurst SOLO ogni N cicli (molto costoso!)
+    // ?? CHECK CACHE - Ricalcola Hurst SOLO ogni N cicli (molto costoso!)
     // ---------------------------------------------------------------
-    // 🌱 Intervallo ricalcolo: derivato dal periodo M5 × scale
-    int hurstRecalcDivisor = GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, HURST_DEFAULT, 1);  // ~17
-    int hurstRecalcInterval = MathMax(4, RecalcEveryBars / hurstRecalcDivisor);  // Minimo 4
+    // ?? Intervallo ricalcolo derivato da f6 � 18 (invece di 40 hardcoded)
+    int hurstRecalcDivisor = (int)MathRound(MathPow(PHI, 6));  // f6 � 18
+    int hurstRecalcInterval = MathMax((int)MathRound(PHI_SQ), RecalcEveryBars / hurstRecalcDivisor);  // Minimo f� � 3
     
     bool needFullHurstRecalc = false;
     if (!g_cacheValid || g_hurstRecalcCounter >= hurstRecalcInterval) {
@@ -1223,13 +1072,13 @@ void RecalculateOrganicSystem()
         } else if (g_dataReady_M5 && tfData_M5.atr_avg > 0) {
             g_lastCacheATR = tfData_M5.atr_avg;
         } else {
-            // 🌱 Fallback data-driven: periodo H1 × scale² pips * pointValue * scale(H)
+            // ?? Fallback organico: f8 � 47 pips � pointValue � f
             //    Usato SOLO se nessun TF ha ATR valido
-            int fallbackPips = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, HURST_DEFAULT, 2);  // ~48
-            g_lastCacheATR = g_pointValue * fallbackPips * GetOrganicScale(g_hurstGlobal);
+            int fallbackPips = (int)MathRound(MathPow(PHI, 8));  // f8 � 47
+            g_lastCacheATR = g_pointValue * fallbackPips * PHI;
         }
     } else {
-        // 🌱 USA CACHE (molto più veloce!)
+        // ?? USA CACHE (molto pi� veloce!)
         result_M5 = g_cachedResult_M5;
         result_H1 = g_cachedResult_H1;
         result_H4 = g_cachedResult_H4;
@@ -1249,28 +1098,28 @@ void RecalculateOrganicSystem()
     }
     
     // ---------------------------------------------------------------
-    // STEP 2: RICALCOLA PESI EMPIRICI (Hurst)
+    // ?? STEP 2: RICALCOLA PESI EMPIRICI (Hurst)
     // peso_TF = hurstExponent_TF / somma(hurstExponent)
     // ---------------------------------------------------------------
     double totalHurst = 0;
-    // hurstExponent validato nel range [HURST_RANGE_MIN, HURST_RANGE_MAX]
+    // ? hurstExponent gi� validato nel range organico [f?�, 1-f?�] da CalculateNaturalPeriodForTF
     if (result_M5.valid) totalHurst += result_M5.hurstExponent;
     if (result_H1.valid) totalHurst += result_H1.hurstExponent;
     if (result_H4.valid) totalHurst += result_H4.hurstExponent;
     if (result_D1.valid) totalHurst += result_D1.hurstExponent;
     
-    // VALIDATO: Protezione divisione per zero
+    // ? VALIDATO: Protezione divisione per zero
     if (totalHurst <= 0) totalHurst = 1.0;
     
-    // VALIDATO: Pesi sempre >= 0 e normalizzati
+    // ? VALIDATO: Pesi sempre >= 0 e normalizzati
     double weight_M5 = result_M5.valid ? (result_M5.hurstExponent / totalHurst) : 0;
     double weight_H1 = result_H1.valid ? (result_H1.hurstExponent / totalHurst) : 0;
     double weight_H4 = result_H4.valid ? (result_H4.hurstExponent / totalHurst) : 0;
     double weight_D1 = result_D1.valid ? (result_D1.hurstExponent / totalHurst) : 0;
     
     // ---------------------------------------------------------------
-    // STEP 3: RICALCOLA PERIODI ORGANICI (solo se Hurst ricalcolato)
-    // OTTIMIZZATO: salta se usiamo cache
+    // ?? STEP 3: RICALCOLA PERIODI ORGANICI (solo se Hurst ricalcolato)
+    // ?? OTTIMIZZATO: salta se usiamo cache
     // ---------------------------------------------------------------
     if (needFullHurstRecalc) {
         if (g_dataReady_M5) CalculateOrganicPeriodsFromData(PERIOD_M5, g_organic_M5, result_M5.period, weight_M5, result_M5.hurstExponent);
@@ -1278,17 +1127,17 @@ void RecalculateOrganicSystem()
         if (g_dataReady_H4) CalculateOrganicPeriodsFromData(PERIOD_H4, g_organic_H4, result_H4.period, weight_H4, result_H4.hurstExponent);
         if (g_dataReady_D1) CalculateOrganicPeriodsFromData(PERIOD_D1, g_organic_D1, result_D1.period, weight_D1, result_D1.hurstExponent);
         
-        // FIX: Controlla se i periodi sono cambiati significativamente (>25%)
-        // Se si, ricrea gli handle indicatori con i nuovi periodi
+        // 🌱 FIX: Controlla se i periodi sono cambiati significativamente (>φ⁻³ ≈ 23.6%)
+        // Se sì, ricrea gli handle indicatori con i nuovi periodi
         if (PeriodsChangedSignificantly()) {
             if (g_enableLogsEffective) {
-                Print("[RECALC] Periodi cambiati >25% - Ricreazione handle indicatori...");
+                Print("[RECALC] 🔄 Periodi cambiati >φ⁻³ (23.6%) - Ricreazione handle indicatori...");
             }
             ReleaseIndicators();
             if (!InitializeIndicators()) {
-                Print("[RECALC] Errore ricreazione handle indicatori!");
+                Print("❌ [RECALC] Errore ricreazione handle indicatori!");
             } else {
-                // FIX: Invalida cache dopo ricreazione handle - i dati vecchi non sono piu validi
+                // 🌱 FIX: Invalida cache dopo ricreazione handle - i dati vecchi non sono più validi
                 g_tfDataCacheValid = false;
                 g_cacheValid = false;
                 if (g_enableLogsEffective) {
@@ -1302,7 +1151,7 @@ void RecalculateOrganicSystem()
     }
     
     // ---------------------------------------------------------------
-    // STEP 4: AGGIORNA FILTRO HURST COMPLETO
+    // ?? STEP 4: AGGIORNA FILTRO HURST COMPLETO
     // - Regimi per ogni TF
     // - H PESATO (non media semplice!)
     // - Aggiunge H al buffer storico ? zona adattiva
@@ -1315,7 +1164,7 @@ void RecalculateOrganicSystem()
         g_hurstRegime_D1 = GetHurstRegime(result_D1.hurstExponent);
         
         // ---------------------------------------------------------------
-        //  CALCOLO H PESATO (non media semplice!)
+        // ?? CALCOLO H PESATO (non media semplice!)
         // H_weighted = S(H_TF � peso_TF) / S(peso_TF)
         // ---------------------------------------------------------------
         double hurstWeightedSum = 0;
@@ -1341,8 +1190,8 @@ void RecalculateOrganicSystem()
         // H composito PESATO (0.0 se nessun dato valido - protezione div/0)
         g_hurstComposite = (weightSum > 0) ? (hurstWeightedSum / weightSum) : 0.0;
         
-        //  Aggiunge H al buffer storico ? calcola zona adattiva
-        //  CRITICO: NON aggiungere valori invalidi (fuori range organico) al buffer!
+        // ?? Aggiunge H al buffer storico ? calcola zona adattiva
+        // ?? CRITICO: NON aggiungere valori invalidi (fuori range organico) al buffer!
         if (weightSum > 0 && g_hurstComposite > HURST_RANGE_MIN && g_hurstComposite < HURST_RANGE_MAX) {
             AddHurstToHistory(g_hurstComposite);
         }
@@ -1351,7 +1200,7 @@ void RecalculateOrganicSystem()
         g_hurstConfidence = GetHurstConfidence(g_hurstComposite);
         
         // ---------------------------------------------------------------
-        //  CALCOLA tradeScore 100% DAI DATI
+        // ?? CALCOLA tradeScore 100% DAI DATI
         // deviation = |H - centro| dove centro = media(H) storica
         // normalizzazione = stdev storica � f (scala data-driven)
         // ? VALIDATO: tradeScore sempre >= 0
@@ -1359,27 +1208,27 @@ void RecalculateOrganicSystem()
         //    - g_hurstConfidence in [0, 1] (validato in GetHurstConfidence)
         //    - normFactor > 0 quando usato
         // ---------------------------------------------------------------
-        //  FIX: Check esplicito g_hurstStdev > 0 (pu� essere 0 se tutti i valori Hurst sono identici)
+        // ?? FIX: Check esplicito g_hurstStdev > 0 (pu� essere 0 se tutti i valori Hurst sono identici)
         if (!g_hurstZoneReady || g_hurstStdev <= 0) {
-            g_hurstTradeScore = 0.0;  // ✅ Zona non pronta o stdev invalida → 0 (sicuro)
+            g_hurstTradeScore = 0.0;  // ? Zona non pronta o stdev invalida ? 0 (sicuro)
         } else {
-            double deviation = MathAbs(g_hurstComposite - g_hurstCenter);  // ✅ >= 0
-            // 🌱 Normalizzazione: dividi per (stdev * scale(H)) - scala 100% dai dati
-            double normFactor = g_hurstStdev * GetOrganicScale(g_hurstGlobal);
+            double deviation = MathAbs(g_hurstComposite - g_hurstCenter);  // ? >= 0
+            // ?? Normalizzazione: dividi per (stdev � f) - scala 100% dai dati
+            double normFactor = g_hurstStdev * PHI;
             if (normFactor > 0) {
-                g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ✅ >= 0
+                g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ? >= 0
             } else {
-                g_hurstTradeScore = 0.0;  // ✅ Fallback sicuro
+                g_hurstTradeScore = 0.0;  // ? Fallback sicuro
             }
         }
         
-        // 🌱 Aggiorna buffer tradeScore per soglia adattiva
+        // ?? Aggiorna buffer tradeScore per soglia adattiva
         // IMPORTANTE: aggiungi SOLO se zona pronta (evita zeri durante warm-up)
-        // 🌱 OTTIMIZZATO: usa somme incrementali O(1) invece di O(n)
-        // 🌱 FIX: Ricalcolo periodico anti-drift
-        // ✅ VALIDATO: g_hurstTradeScore >= 0 garantito (vedi sopra)
+        // ?? OTTIMIZZATO: usa somme incrementali O(1) invece di O(n)
+        // ?? FIX: Ricalcolo periodico anti-drift
+        // ? VALIDATO: g_hurstTradeScore >= 0 garantito (vedi sopra)
         if (g_hurstZoneReady) {
-            //  FIX: Ricalcolo completo periodico per evitare drift floating point
+            // ?? FIX: Ricalcolo completo periodico per evitare drift floating point
             g_tradeScoreOperationCount++;
             if (g_tradeScoreOperationCount >= TRADE_SCORE_HISTORY_MAX) {
                 RecalculateTradeScoreSumsFromScratch();
@@ -1402,29 +1251,27 @@ void RecalculateOrganicSystem()
             g_tradeScoreSum += g_hurstTradeScore;
             g_tradeScoreSumSq += g_hurstTradeScore * g_hurstTradeScore;
             
-            //  VALIDATO: indice buffer sempre nel range [0, TRADE_SCORE_HISTORY_MAX-1]
+            // ? VALIDATO: indice buffer sempre nel range [0, TRADE_SCORE_HISTORY_MAX-1]
             g_tradeScoreHistoryIndex = (g_tradeScoreHistoryIndex + 1) % TRADE_SCORE_HISTORY_MAX;
             if (g_tradeScoreHistorySize < TRADE_SCORE_HISTORY_MAX) g_tradeScoreHistorySize++;
         }
         
-        //  Calcola soglia tradeScore O(1) con somme incrementali!
-        // Minimo campioni = decay^2 del buffer (~25% per H=0.5, meno per H alto)
-        double minFraction = GetOrganicDecayPow(g_hurstGlobal > 0 ? g_hurstGlobal : HURST_DEFAULT, 2.0);
-        int minTradeScoreSamples = (int)MathCeil(TRADE_SCORE_HISTORY_MAX * minFraction);
+        // ?? Calcola soglia tradeScore O(1) con somme incrementali!
+        int minTradeScoreSamples = (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ);  // ~38% del buffer
         if (g_tradeScoreHistorySize >= minTradeScoreSamples) {
-            //  VALIDATO: Media O(1) - divisione sicura (minTradeScoreSamples >= 1)
+            // ? VALIDATO: Media O(1) - divisione sicura (minTradeScoreSamples >= 1)
             double meanTS = g_tradeScoreSum / g_tradeScoreHistorySize;
-            //  VALIDATO: Varianza O(1): E[X�] - E[X]� con protezione negativa
+            // ? VALIDATO: Varianza O(1): E[X�] - E[X]� con protezione negativa
             double meanSqTS = g_tradeScoreSumSq / g_tradeScoreHistorySize;
             double varianceTS = meanSqTS - (meanTS * meanTS);
             double stdevTS = (varianceTS > 0) ? MathSqrt(varianceTS) : 0.0;
-            g_tradeScoreThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);  // ✓ >= 0
+            g_tradeScoreThreshold = meanTS + stdevTS * PHI_INV;  // ? >= 0
             g_tradeScoreReady = true;
         } else {
             g_tradeScoreReady = false;
         }
         
-        //  DECISIONE TRADE: richiede zona Hurst + soglia tradeScore pronte
+        // ?? DECISIONE TRADE: richiede zona Hurst + soglia tradeScore pronte
         g_hurstReady = (g_hurstZoneReady && g_tradeScoreReady);
         g_hurstAllowTrade = g_hurstReady && (g_hurstTradeScore >= g_tradeScoreThreshold);
         
@@ -1432,7 +1279,7 @@ void RecalculateOrganicSystem()
     }
     
     // ---------------------------------------------------------------
-    //  STEP 5: AGGIORNA SOGLIA SCORE DINAMICA
+    // ?? STEP 5: AGGIORNA SOGLIA SCORE DINAMICA
     // Se AutoScoreThreshold=true, ricalcola dalla distribuzione
     // ---------------------------------------------------------------
     UpdateDynamicThreshold();
@@ -1440,7 +1287,7 @@ void RecalculateOrganicSystem()
     // Log dettagliato del ricalcolo organico
     if (g_enableLogsEffective) {
         Print("+-----------------------------------------------------------------------------+");
-        Print("�  RICALCOLO SISTEMA ORGANICO COMPLETATO                                    �");
+        Print("� ?? RICALCOLO SISTEMA ORGANICO COMPLETATO                                    �");
         Print("+-----------------------------------------------------------------------------�");
         Print("� STEP 1: PERIODI NATURALI (derivati da autocorrelazione dati)               �");
         PrintFormat("�   M5=%3d | H1=%3d | H4=%3d | D1=%3d                                        �",
@@ -1457,16 +1304,16 @@ void RecalculateOrganicSystem()
         Print("� STEP 3: PESI TF (derivati da Hurst: peso = H_TF / S(H))                     �");
         PrintFormat("�   M5=%.3f | H1=%.3f | H4=%.3f | D1=%.3f                                    �",
             weight_M5, weight_H1, weight_H4, weight_D1);
-        Print("+-----------------------------------------------------------------------------|");
-        Print("| STEP 4: ZONA HURST ADATTIVA (centro=mean(H), margine=stdev*decay)          |");
-        PrintFormat("|   Centro: %.4f (mean storica) | Stdev: %.5f                              |", g_hurstCenter, g_hurstStdev);
+        Print("+-----------------------------------------------------------------------------�");
+        Print("� STEP 4: ZONA HURST ADATTIVA (centro=mean(H), margine=stdev�f?�)             �");
+        PrintFormat("�   Centro: %.4f (mean storica) | Stdev: %.5f                              �", g_hurstCenter, g_hurstStdev);
         PrintFormat("�   Zona: [%.4f, %.4f] | Buffer: %d/%d campioni                          �", 
             g_hurstRandomLow, g_hurstRandomHigh, g_hurstHistorySize, HURST_HISTORY_MAX);
         PrintFormat("�   TradeScore: %.4f | Soglia: %.4f | Stato: %s                           �",
             g_hurstTradeScore, g_tradeScoreThreshold,
             g_hurstAllowTrade ? "? TRADE OK" : (g_hurstReady ? "? BLOCCATO" : "? ATTESA DATI"));
-        Print("+-----------------------------------------------------------------------------|");
-        Print("| STEP 5: SOGLIA SCORE DINAMICA (formula: mean + stdev * decay)              |");
+        Print("+-----------------------------------------------------------------------------�");
+        Print("� STEP 5: SOGLIA SCORE DINAMICA (formula: mean + stdev � f?�)                 �");
         if (g_scoreThresholdReady) {
             PrintFormat("�   Soglia corrente: %.2f%% | Buffer: %d/%d | Pronta: ?                     �",
                 g_dynamicThreshold, g_scoreHistorySize, SCORE_HISTORY_MAX);
@@ -1479,28 +1326,32 @@ void RecalculateOrganicSystem()
 }
 
 //+------------------------------------------------------------------+
-//| 🔬 Calcola ESPONENTE DI HURST (metodo R/S - OTTIMIZZATO)         |
-//| 🔬 Scale derivate da periodi naturali × scale^n(H)               |
+//| ?? Calcola ESPONENTE DI HURST (metodo R/S - OTTIMIZZATO)         |
+//| ?? Usa scale fisse e limite barre per velocit�                   |
 //+------------------------------------------------------------------+
 double CalculateHurstExponent(MqlRates &rates[], int n)
 {
-    // 🔬 LIMITI DATA-DRIVEN: derivati da periodi naturali
-    int minBarsHurst = GetBufferXLarge();    // ~48-68 barre minimo
-    int maxBarsHurst = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 4);  // ~96-192 max
+    // ?? COSTANTI ORGANICHE: tutte derivate da potenze di f
+    // f8 � 47, f�� � 199 (limite max per evitare rumore)
+    int minBarsHurst = (int)MathRound(MathPow(PHI, 8));   // f8 � 47
+    int maxBarsHurst = (int)MathRound(MathPow(PHI, 11));  // f�� � 199
     
-    // 🔬 Range Hurst valido: derivato da statistiche empiriche
-    double hurstMin = HURST_RANGE_MIN;        // 0.1 (minimo teorico)
-    double hurstMax = HURST_RANGE_MAX;        // 0.9 (massimo teorico)
+    // ?? Range Hurst valido: derivato da f?� e 1-f?�
+    double hurstMin = PHI_INV_SQ;           // � 0.382 (sotto = molto mean-reverting)
+    double hurstMax = 1.0 - PHI_INV_SQ;     // � 0.618 (sopra = molto trending)
+    // Estendiamo leggermente per catturare valori estremi
+    hurstMin = hurstMin * PHI_INV;          // � 0.236
+    hurstMax = 1.0 - hurstMin;              // � 0.764
     
-    // 🔬 OTTIMIZZAZIONE: Minimo barre
-    // Se dati insufficienti, ritorna centro storico SE disponibile dai DATI
-    // NESSUN fallback teorico (0.5) - solo valori empirici!
+    // ?? OTTIMIZZAZIONE: Minimo barre organico
+    // ?? Se dati insufficienti, ritorna centro storico SE disponibile dai DATI
+    //    NESSUN fallback teorico (0.5) - solo valori empirici!
     if (n < minBarsHurst) {
         if (g_hurstZoneReady && g_hurstCenter > 0) return g_hurstCenter;
         return -1.0;  // Segnala "dati insufficienti" (gestito dal chiamante)
     }
     
-    // 🔬 Limita a max barre (derivato organicamente)
+    // ?? Limita a f�� barre max (derivato organicamente)
     int effectiveN = MathMin(n, maxBarsHurst);
     
     // Calcola i rendimenti logaritmici
@@ -1517,18 +1368,17 @@ double CalculateHurstExponent(MqlRates &rates[], int n)
     int numReturns = effectiveN - 1;
     
     // ---------------------------------------------------------------
-    // 🔬 METODO R/S - Scale derivate da periodi naturali
-    // Scale = DEFAULT_PERIOD_M5 × scale^n(H) per n = 0, 1, 2, 3, 4
-    // Con H=0.5: ~12, ~17, ~24, ~34, ~48 (distribuzione logaritmica)
+    // ?? METODO R/S SEMPLIFICATO - Scale calcolate dinamicamente da f
+    // Scale = potenze ESATTE di f: round(f5), round(f6), round(f7), round(f8), round(f?)
     // ---------------------------------------------------------------
     double logN[5], logRS[5];
-    // 🔬 Scale data-driven: periodo base × scale^n
+    // ?? Scale calcolate dinamicamente da potenze di f
     int scales[5];
-    scales[0] = GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, g_hurstGlobal, 0);  // ~12
-    scales[1] = GetDataDrivenBufferSize(DEFAULT_PERIOD_M5, g_hurstGlobal, 1);  // ~17
-    scales[2] = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 0);  // ~24
-    scales[3] = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 1);  // ~34
-    scales[4] = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 2);  // ~48
+    scales[0] = (int)MathRound(MathPow(PHI, 5));  // f5 � 11
+    scales[1] = (int)MathRound(MathPow(PHI, 6));  // f6 � 18
+    scales[2] = (int)MathRound(MathPow(PHI, 7));  // f7 � 29
+    scales[3] = (int)MathRound(MathPow(PHI, 8));  // f8 � 47
+    scales[4] = (int)MathRound(MathPow(PHI, 9));  // f? � 76
     int numScales = 0;
     
     for (int s = 0; s < 5; s++) {
@@ -1588,9 +1438,9 @@ double CalculateHurstExponent(MqlRates &rates[], int n)
     // ---------------------------------------------------------------
     // REGRESSIONE LINEARE VELOCE
     // ---------------------------------------------------------------
-    // 🌱 Minimo scale = 3 (minimo statistico per regressione)
-    int minScales = 3;
-    // 🌱 Se scale insufficienti, ritorna centro storico SE disponibile dai DATI
+    // ?? Minimo scale = round(f�) � 3
+    int minScales = (int)MathRound(PHI_SQ);
+    // ?? Se scale insufficienti, ritorna centro storico SE disponibile dai DATI
     //    NESSUN fallback teorico (0.5) - solo valori empirici!
     if (numScales < minScales) {
         if (g_hurstZoneReady && g_hurstCenter > 0) return g_hurstCenter;
@@ -1606,9 +1456,9 @@ double CalculateHurstExponent(MqlRates &rates[], int n)
     }
     
     double denom = numScales * sumX2 - sumX * sumX;
-    // 🌱 Threshold divisione: 1e-5 (soglia numerica standard)
-    double divThreshold = 1e-5;
-    // 🌱 Se denominatore troppo piccolo, ritorna centro storico SE disponibile dai DATI
+    // ?? Threshold divisione: f?�� � 1.3e-5 (derivato da f)
+    double divThreshold = MathPow(PHI_INV, 10);
+    // ?? Se denominatore troppo piccolo, ritorna centro storico SE disponibile dai DATI
     //    NESSUN fallback teorico (0.5) - solo valori empirici!
     if (MathAbs(denom) < divThreshold) {
         if (g_hurstZoneReady && g_hurstCenter > 0) return g_hurstCenter;
@@ -1617,23 +1467,23 @@ double CalculateHurstExponent(MqlRates &rates[], int n)
     
     double H = (numScales * sumXY - sumX * sumY) / denom;
     
-    // VALIDATO: Forza H nel range valido [HURST_RANGE_MIN, HURST_RANGE_MAX]
-    // Range empirico tipico per mercati finanziari: [0.1, 0.9]
+    // ? VALIDATO: Forza H nel range valido derivato da f
+    // Range: [f?�, 1-f?�] � [0.236, 0.764]
     H = MathMax(hurstMin, MathMin(hurstMax, H));
     return H;
 }
 
 //+------------------------------------------------------------------+
-//| FILTRO HURST: Determina il regime da un singolo valore H         |
+//| ?? FILTRO HURST: Determina il regime da un singolo valore H      |
 //| Soglie ADATTIVE 100% dai dati storici:                           |
-//|   centro = media(H), margine = stdev(H) * decay(H)               |
+//|   centro = media(H), margine = stdev(H) � f?�                    |
 //+------------------------------------------------------------------+
-//  VALIDATO: Funzione robusta con protezioni
+// ? VALIDATO: Funzione robusta con protezioni
 //    INPUT: h pu� essere qualsiasi valore
 //    OUTPUT: ENUM valida garantita
 ENUM_HURST_REGIME GetHurstRegime(double h)
 {
-    //  VALIDATO: Se H non valido o zona non pronta, ritorna stato sicuro
+    // ? VALIDATO: Se H non valido o zona non pronta, ritorna stato sicuro
     if (h < 0 || !g_hurstZoneReady) return HURST_RANDOM;
     
     if (h > g_hurstRandomHigh) return HURST_TRENDING;   // Sopra zona random
@@ -1651,19 +1501,19 @@ ENUM_HURST_REGIME GetHurstRegime(double h)
 //+------------------------------------------------------------------+
 double GetHurstConfidence(double h)
 {
-    // ✅ VALIDATO: Se non pronto o stdev invalido, ritorna 0.0 (sicuro)
+    // ? VALIDATO: Se non pronto o stdev invalido, ritorna 0.0 (sicuro)
     if (!g_hurstZoneReady || g_hurstStdev <= 0) return 0.0;
     double deviation = MathAbs(h - g_hurstCenter);
-    double maxDeviation = g_hurstStdev * GetOrganicScale(g_hurstGlobal);  // Scala basata su stdev * scale(H)
-    // ✅ VALIDATO: maxDeviation > 0 perché stdev > 0 e scale(H) > 0
+    double maxDeviation = g_hurstStdev * PHI;  // Scala basata su stdev � f
+    // ? VALIDATO: maxDeviation > 0 perch� stdev > 0 e PHI > 0
     double confidence = deviation / maxDeviation;
-    return MathMin(1.0, confidence);               // ✅ Cap a 1.0
+    return MathMin(1.0, confidence);               // ? Cap a 1.0
 }
 
 //+------------------------------------------------------------------+
-//| 🌱 FILTRO HURST: Inizializza buffer H storico                    |
-//| NESSUN VALORE INIZIALE - tutto sarà calcolato dai dati!          |
-//| ✅ VALIDAZIONE: Tutti i valori inizializzati a stati sicuri      |
+//| ?? FILTRO HURST: Inizializza buffer H storico                    |
+//| NESSUN VALORE INIZIALE - tutto sar� calcolato dai dati!          |
+//| ? VALIDAZIONE: Tutti i valori inizializzati a stati sicuri      |
 //+------------------------------------------------------------------+
 void InitHurstHistoryBuffer()
 {
@@ -1711,28 +1561,28 @@ void InitHurstHistoryBuffer()
 }
 
 //+------------------------------------------------------------------+
-//|  PRE-CARICAMENTO MULTI-TF OTTIMIZZATO                          |
-//| Usa tutti i TF disponibili ma con campionamento per velocità     |
+//| ?? PRE-CARICAMENTO MULTI-TF OTTIMIZZATO                          |
+//| Usa tutti i TF disponibili ma con campionamento per velocit�     |
 //+------------------------------------------------------------------+
 void PreloadHurstBufferFromHistory()
 {
     if (!EnableHurstFilter) return;
     
-    // 🌱 CONFIGURAZIONE 100% DATA-DRIVEN
-    // barsPerHurst derivato da periodo H1 × scale²(H) ≈ 48-68
-    int barsPerHurst = GetBufferXLarge();  // ~48-68
+    // ?? CONFIGURAZIONE 100% ORGANICA (derivata da f)
+    // barsPerHurst = f8 � 47 (minimo statistico) � f � 76
+    int barsPerHurst = (int)MathRound(MathPow(PHI, 8) * PHI);  // � 76
     int samplesToPreload = HURST_HISTORY_MAX;  // Calcolato dinamicamente in OnInit
-    // skipFactor = ceiling di scale(H) - adattivo al regime
-    int skipFactor = MathMax(2, (int)MathCeil(GetOrganicScale(g_hurstGlobal)));
+    // ?? skipFactor = round(f) = 2 (derivato organicamente)
+    int skipFactor = (int)MathRound(PHI);  // � 2
     int effectiveSamples = samplesToPreload / skipFactor;
     
-    // 🌱 Buffer: tutti derivati da periodi naturali
-    int bufferM5 = GetBufferMedium();  // ~17
-    int bufferH1 = GetBufferSmall();   // ~12
-    int bufferH4 = MathMax(4, DEFAULT_PERIOD_H4);  // 6 (H4 per giorno)
-    int bufferD1 = GetBufferMedium();  // ~17
+    // ?? Buffer organici: derivati da potenze di f
+    int bufferM5 = (int)MathRound(MathPow(PHI, 5));  // f5 � 11
+    int bufferH1 = (int)MathRound(MathPow(PHI, 4));  // f4 � 7
+    int bufferH4 = (int)MathRound(MathPow(PHI, 3));  // f� � 4
+    int bufferD1 = (int)MathRound(MathPow(PHI, 5));  // f5 � 11
     
-    //  Rapporti TF calcolati dinamicamente dai minuti reali
+    // ?? Rapporti TF calcolati dinamicamente dai minuti reali
     int minutesM5 = PeriodSeconds(PERIOD_M5) / 60;   // = 5
     int minutesH1 = PeriodSeconds(PERIOD_H1) / 60;   // = 60
     int minutesH4 = PeriodSeconds(PERIOD_H4) / 60;   // = 240
@@ -1756,7 +1606,7 @@ void PreloadHurstBufferFromHistory()
     ArraySetAsSeries(ratesH4, true);
     ArraySetAsSeries(ratesD1, true);
     
-    //  FIX: Usa start=1 per caricare dati STORICI (barre completate, non quella corrente incompleta)
+    // ?? FIX: Usa start=1 per caricare dati STORICI (barre completate, non quella corrente incompleta)
     int copiedM5 = g_dataReady_M5 ? CopyRates(_Symbol, PERIOD_M5, 1, totalBarsM5, ratesM5) : 0;
     int copiedH1 = g_dataReady_H1 ? CopyRates(_Symbol, PERIOD_H1, 1, totalBarsH1, ratesH1) : 0;
     int copiedH4 = g_dataReady_H4 ? CopyRates(_Symbol, PERIOD_H4, 1, totalBarsH4, ratesH4) : 0;
@@ -1773,7 +1623,7 @@ void PreloadHurstBufferFromHistory()
     
     // ---------------------------------------------------------------
     // FASE 1: Calcola Hurst composito campionato
-    //  VALIDATO: Ogni hX validato nel range organico prima di usare
+    // ? VALIDATO: Ogni hX validato nel range organico prima di usare
     // ---------------------------------------------------------------
     double hurstValues[];
     ArrayResize(hurstValues, effectiveSamples);
@@ -1800,7 +1650,7 @@ void PreloadHurstBufferFromHistory()
         
         // H1 - ? VALIDATO: hH1 controllato nel range organico
         if (copiedH1 > 0) {
-            //  Rapporto calcolato dinamicamente
+            // ?? Rapporto calcolato dinamicamente
             int idxH1 = (int)MathRound(i / ratioH1);
             int barsH1 = barsPerHurst / 2;
             if (copiedH1 >= idxH1 + barsH1) {
@@ -1815,9 +1665,9 @@ void PreloadHurstBufferFromHistory()
             }
         }
         
-        // H4 -  VALIDATO: hH4 controllato nel range organico
+        // H4 - ? VALIDATO: hH4 controllato nel range organico
         if (copiedH4 > 0) {
-            //  Rapporto calcolato dinamicamente
+            // ?? Rapporto calcolato dinamicamente
             int idxH4 = (int)MathRound(i / ratioH4);
             int barsH4 = barsPerHurst / 4;
             if (copiedH4 >= idxH4 + barsH4) {
@@ -1832,17 +1682,17 @@ void PreloadHurstBufferFromHistory()
             }
         }
         
-        // D1 - ✅ VALIDATO: hD1 controllato nel range organico
-        // 🌱 Minimo barre D1 = 16 (potenza di 2)
-        int minBarsD1 = GetBufferMedium();  // 16
+        // D1 - ? VALIDATO: hD1 controllato nel range organico
+        // ?? Minimo barre D1 = f5 � 11 (derivato organicamente)
+        int minBarsD1 = (int)MathRound(MathPow(PHI, 5));
         if (copiedD1 >= minBarsD1) {
-            // 🌱 Rapporto calcolato dinamicamente
+            // ?? Rapporto calcolato dinamicamente
             int idxD1 = (int)MathRound(i / ratioD1);
-            // 🌱 Buffer D1 = 8 (potenza di 2)
-            int bufD1 = GetBufferSmall();  // 8
+            // ?? Buffer D1 = f4 � 7 (derivato organicamente)
+            int bufD1 = (int)MathRound(MathPow(PHI, 4));
             if (idxD1 < copiedD1 - bufD1) {
                 MqlRates subRates[];
-                // 🌱 Barre D1 minimo = 8
+                // ?? Barre D1 minimo = f4 � 7
                 int barsD1 = MathMin(bufD1 * 3, copiedD1 - idxD1);
                 ArrayResize(subRates, barsD1);
                 for (int j = 0; j < barsD1; j++) subRates[j] = ratesD1[idxD1 + j];
@@ -1855,7 +1705,7 @@ void PreloadHurstBufferFromHistory()
         }
         
         // Calcola Hurst composito pesato
-        // VALIDATO: weightSum > 0, hComposite nel range organico
+        // ? VALIDATO: weightSum > 0, hComposite nel range organico
         if (weightSum > 0) {
             double hComposite = hurstWeightedSum / weightSum;
             
@@ -1866,7 +1716,7 @@ void PreloadHurstBufferFromHistory()
             lastValidIndex = sample;
             
             // Aggiungi al buffer (replica per compensare skip)
-            //  CRITICO: Aggiorna anche le somme incrementali!
+            // ?? CRITICO: Aggiorna anche le somme incrementali!
             for (int rep = 0; rep < skipFactor; rep++) {
                 // ? Se buffer pieno, sottrai valore vecchio che stiamo per sovrascrivere
                 if (g_hurstHistorySize == HURST_HISTORY_MAX) {
@@ -1895,81 +1745,77 @@ void PreloadHurstBufferFromHistory()
     
     // ---------------------------------------------------------------
     // FASE 2: Calcola centro, stdev e zona Hurst
-    //  OTTIMIZZATO: usa le somme incrementali gi� calcolate!
-    //  VALIDATO: divisione sicura (g_hurstHistorySize >= minSamples >= 1)
-    //  FIX: Check esplicito per g_hurstHistorySize == 0
+    // ?? OTTIMIZZATO: usa le somme incrementali gi� calcolate!
+    // ? VALIDATO: divisione sicura (g_hurstHistorySize >= minSamples >= 1)
+    // ?? FIX: Check esplicito per g_hurstHistorySize == 0
     // ---------------------------------------------------------------
     
-    // 🔬 FIX: Protezione divisione per zero - nessun campione valido
+    // ?? FIX: Protezione divisione per zero - nessun campione valido
     if (g_hurstHistorySize == 0) {
-        PrintFormat("[PRELOAD] ⚠️ Nessun campione Hurst valido - pre-caricamento fallito");
+        PrintFormat("[PRELOAD] ?? Nessun campione Hurst valido - pre-caricamento fallito");
         return;
     }
     
-    // Minimo campioni = decay^2 del buffer (~25% per H=0.5)
-    double minFractionPreload = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
-    int minSamples = (int)MathCeil(HURST_HISTORY_MAX * minFractionPreload);
+    int minSamples = (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ);
     if (g_hurstHistorySize < minSamples) {
-        PrintFormat("[PRELOAD] ⚠️ Pre-caricamento parziale Hurst: solo %d campioni validi", successCount);
+        PrintFormat("[PRELOAD] ?? Pre-caricamento parziale Hurst: solo %d campioni validi", successCount);
         return;
     }
     
-    // 🔬 ✓ Calcola centro O(1) - divisione sicura (g_hurstHistorySize > 0 garantito)
+    // ?? ? Calcola centro O(1) - divisione sicura (g_hurstHistorySize > 0 garantito)
     g_hurstCenter = g_hurstSum / g_hurstHistorySize;
     
-    // 🔬 ✓ Calcola stdev O(1): Var(X) = E[X²] - E[X]² con protezione negativa
+    // ?? ? Calcola stdev O(1): Var(X) = E[X�] - E[X]� con protezione negativa
     double meanSq = g_hurstSumSq / g_hurstHistorySize;
     double variance = meanSq - (g_hurstCenter * g_hurstCenter);
-    g_hurstStdev = (variance > 0) ? MathSqrt(variance) : 0.0;  // ✓ >= 0
+    g_hurstStdev = (variance > 0) ? MathSqrt(variance) : 0.0;  // ? >= 0
     
-    // Calcola margine e zona usando decay dinamico
-    double globalDecay = GetOrganicDecay(g_hurstGlobal);
-    double globalScale = GetOrganicScale(g_hurstGlobal);  // 2^H
-    double newMargin = g_hurstStdev * globalDecay;
-    double minMargin = g_hurstStdev * globalDecay * globalDecay;  // decay^2 ~ 0.25
-    double maxMargin = g_hurstStdev * globalScale;  // scale(H) ~ 1.4-1.6
-    g_hurstZoneMargin = MathMax(minMargin, MathMin(maxMargin, newMargin));  // ✓ >= 0
+    // ? Calcola margine e zona
+    double newMargin = g_hurstStdev * PHI_INV;
+    double minMargin = g_hurstStdev * PHI_INV_SQ;
+    double maxMargin = g_hurstStdev * PHI;
+    g_hurstZoneMargin = MathMax(minMargin, MathMin(maxMargin, newMargin));  // ? >= 0
     
     g_hurstRandomLow = g_hurstCenter - g_hurstZoneMargin;
     g_hurstRandomHigh = g_hurstCenter + g_hurstZoneMargin;
     g_hurstZoneReady = true;
     
-    PrintFormat("[PRELOAD] ✓ Buffer Hurst: %d/%d | Centro=%.4f Stdev=%.4f Zona=[%.4f, %.4f]", 
+    PrintFormat("[PRELOAD] ? Buffer Hurst: %d/%d | Centro=%.4f Stdev=%.4f Zona=[%.4f, %.4f]", 
         successCount, samplesToPreload, g_hurstCenter, g_hurstStdev, g_hurstRandomLow, g_hurstRandomHigh);
     
     // ---------------------------------------------------------------
     // FASE 3: Calcola TradeScore per ogni campione Hurst e riempi buffer
     // Ora che abbiamo centro e stdev, possiamo calcolare i tradeScore!
-    // ✓ VALIDATO: tradeScore >= 0 garantito
+    // ? VALIDATO: tradeScore >= 0 garantito
     // ---------------------------------------------------------------
     int tradeScoreCount = 0;
     int samplesToPreloadTS = MathMin(effectiveSamples, TRADE_SCORE_HISTORY_MAX);
     
     for (int i = 0; i < samplesToPreloadTS; i++) {
         double h = hurstValues[i];
-        if (h < HURST_RANGE_MIN || h > HURST_RANGE_MAX) continue;  // ✓ Solo valori validi
+        if (h < HURST_RANGE_MIN || h > HURST_RANGE_MAX) continue;  // ? Solo valori validi
         
-        // 🔬 Calcola confidence (stessa logica di GetHurstConfidence)
-        double deviation = MathAbs(h - g_hurstCenter);  // ✓ >= 0
-        double maxDeviation = g_hurstStdev * globalScale;  // scale(H) sigma
-        double confidence = (maxDeviation > 0) ? MathMin(1.0, deviation / maxDeviation) : 0.0;  // ✓ [0, 1]
+        // ? Calcola confidence (stessa logica di GetHurstConfidence)
+        double deviation = MathAbs(h - g_hurstCenter);  // ? >= 0
+        double maxDeviation = g_hurstStdev * PHI;
+        double confidence = (maxDeviation > 0) ? MathMin(1.0, deviation / maxDeviation) : 0.0;  // ? [0, 1]
         
-        // 🔬 Calcola tradeScore (stessa logica di RecalculateOrganicSystem)
-        double normFactor = g_hurstStdev * globalScale;  // scale(H) sigma
+        // ? Calcola tradeScore (stessa logica di RecalculateOrganicSystem)
+        double normFactor = g_hurstStdev * PHI;
         double tradeScore = 0;
         if (normFactor > 0) {
-            tradeScore = deviation * confidence / normFactor;  // ✓ >= 0
+            tradeScore = deviation * confidence / normFactor;  // ? >= 0
         }
         
         // Aggiungi al buffer TradeScore
-        //  CRITICO: Aggiorna anche le somme incrementali!
-        //  Se buffer pieno, sottrai valore vecchio che stiamo per sovrascrivere
+        // ?? CRITICO: Aggiorna anche le somme incrementali!
+        // ? Se buffer pieno, sottrai valore vecchio che stiamo per sovrascrivere
         if (g_tradeScoreHistorySize == TRADE_SCORE_HISTORY_MAX) {
             double oldValue = g_tradeScoreHistory[g_tradeScoreHistoryIndex];
             g_tradeScoreSum -= oldValue;
             g_tradeScoreSumSq -= oldValue * oldValue;
             
-            //  SANITY CHECK: protezione da errori floating point
+            // ? SANITY CHECK: protezione da errori floating point
             if (g_tradeScoreSum < 0) g_tradeScoreSum = 0;
             if (g_tradeScoreSumSq < 0) g_tradeScoreSumSq = 0;
         }
@@ -1988,33 +1834,32 @@ void PreloadHurstBufferFromHistory()
     
     // ---------------------------------------------------------------
     // FASE 4: Calcola soglia TradeScore dai dati pre-caricati
-    // OTTIMIZZATO: usa le somme incrementali già calcolate!
-    // VALIDATO: divisione sicura (minTradeScoreSamples >= 1)
+    // ?? OTTIMIZZATO: usa le somme incrementali gi� calcolate!
+    // ? VALIDATO: divisione sicura (minTradeScoreSamples >= 1)
     // ---------------------------------------------------------------
-    double minFractionTS = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
-    int minTradeScoreSamples = (int)MathCeil(TRADE_SCORE_HISTORY_MAX * minFractionTS);
+    int minTradeScoreSamples = (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ);
     if (g_tradeScoreHistorySize >= minTradeScoreSamples) {
-        // 🌱 ✅ Media O(1) - divisione sicura
+        // ?? ? Media O(1) - divisione sicura
         double meanTS = g_tradeScoreSum / g_tradeScoreHistorySize;
         
-        // 🌱 ✅ Varianza O(1): Var(X) = E[X²] - E[X]² con protezione negativa
+        // ?? ? Varianza O(1): Var(X) = E[X�] - E[X]� con protezione negativa
         double meanSqTS = g_tradeScoreSumSq / g_tradeScoreHistorySize;
         double varianceTS = meanSqTS - (meanTS * meanTS);
         double stdevTS = (varianceTS > 0) ? MathSqrt(varianceTS) : 0.0;
         
-        g_tradeScoreThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);  // ✅ >= 0
+        g_tradeScoreThreshold = meanTS + stdevTS * PHI_INV;  // ? >= 0
         g_tradeScoreReady = true;
         
-        PrintFormat("[PRELOAD] ✅ Buffer TradeScore: %d/%d | Soglia=%.4f", 
+        PrintFormat("[PRELOAD] ? Buffer TradeScore: %d/%d | Soglia=%.4f", 
             tradeScoreCount, TRADE_SCORE_HISTORY_MAX, g_tradeScoreThreshold);
     } else {
-        PrintFormat("[PRELOAD] ⚠️ TradeScore parziale: solo %d campioni", tradeScoreCount);
+        PrintFormat("[PRELOAD] ?? TradeScore parziale: solo %d campioni", tradeScoreCount);
     }
     
     // ---------------------------------------------------------------
     // FASE 5: Imposta stato globale per permettere trading immediato
     // CRITICO: Calcola g_hurstTradeScore e g_hurstAllowTrade!
-    //  VALIDATO: tutti i valori usati sono gi� validati nelle fasi precedenti
+    // ? VALIDATO: tutti i valori usati sono gi� validati nelle fasi precedenti
     // ---------------------------------------------------------------
     g_hurstReady = (g_hurstZoneReady && g_tradeScoreReady);
     
@@ -2023,23 +1868,23 @@ void PreloadHurstBufferFromHistory()
         double lastHurst = hurstValues[lastValidIndex];  // ? Gi� validato nel range organico
         g_hurstComposite = lastHurst;
         
-        // ✅ Calcola g_hurstConfidence (stessa logica di GetHurstConfidence)
-        double deviation = MathAbs(lastHurst - g_hurstCenter);  // ✅ >= 0
-        double maxDeviation = g_hurstStdev * GetOrganicScale(g_hurstGlobal);
-        g_hurstConfidence = (maxDeviation > 0) ? MathMin(1.0, deviation / maxDeviation) : 0.0;  // ✅ [0, 1]
+        // ? Calcola g_hurstConfidence (stessa logica di GetHurstConfidence)
+        double deviation = MathAbs(lastHurst - g_hurstCenter);  // ? >= 0
+        double maxDeviation = g_hurstStdev * PHI;
+        g_hurstConfidence = (maxDeviation > 0) ? MathMin(1.0, deviation / maxDeviation) : 0.0;  // ? [0, 1]
         
-        // ✅ Calcola g_hurstTradeScore (stessa logica di RecalculateOrganicSystem)
-        double normFactor = g_hurstStdev * GetOrganicScale(g_hurstGlobal);
+        // ? Calcola g_hurstTradeScore (stessa logica di RecalculateOrganicSystem)
+        double normFactor = g_hurstStdev * PHI;
         if (normFactor > 0) {
-            g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ✅ >= 0
+            g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ? >= 0
         } else {
-            g_hurstTradeScore = 0;  // ✅ Fallback sicuro
+            g_hurstTradeScore = 0;  // ? Fallback sicuro
         }
         
         // CRITICO: Setta g_hurstAllowTrade per permettere trading!
         g_hurstAllowTrade = (g_hurstTradeScore >= g_tradeScoreThreshold);
         
-        PrintFormat("[PRELOAD] 🌱🌱🌱 PRE-CARICAMENTO COMPLETO!");
+        PrintFormat("[PRELOAD] ??? PRE-CARICAMENTO COMPLETO!");
         PrintFormat("[PRELOAD]   H_composito=%.4f | Centro=%.4f | Confidence=%.3f", 
             g_hurstComposite, g_hurstCenter, g_hurstConfidence);
         PrintFormat("[PRELOAD]   TradeScore=%.4f %s Soglia=%.4f ? %s", 
@@ -2053,15 +1898,15 @@ void PreloadHurstBufferFromHistory()
 }
 
 //+------------------------------------------------------------------+
-//| FILTRO HURST: Aggiungi H al buffer e aggiorna zona adattiva      |
-//| OTTIMIZZATO: Usa somme incrementali O(1) invece di O(n)          |
-//| FIX: Ricalcolo periodico completo per evitare drift numerico     |
-//| INPUT VALIDATO: h deve essere nel range [HURST_RANGE_MIN, MAX]   |
+//| ?? FILTRO HURST: Aggiungi H al buffer e aggiorna zona adattiva   |
+//| ?? OTTIMIZZATO: Usa somme incrementali O(1) invece di O(n)       |
+//| ?? FIX: Ricalcolo periodico completo per evitare drift numerico  |
+//| ? INPUT VALIDATO: h deve essere nel range organico [f?�, 1-f?�]  |
 //|    (validazione fatta dal chiamante prima di questa funzione)    |
 //+------------------------------------------------------------------+
 void AddHurstToHistory(double h)
 {
-    // 🔬 FIX: Ricalcolo completo periodico per evitare drift floating point
+    // ?? FIX: Ricalcolo completo periodico per evitare drift floating point
     // Ogni HURST_HISTORY_MAX operazioni, ricalcola somme da zero
     g_hurstOperationCount++;
     if (g_hurstOperationCount >= HURST_HISTORY_MAX) {
@@ -2069,60 +1914,54 @@ void AddHurstToHistory(double h)
         g_hurstOperationCount = 0;
     }
     
-    // ✓ VALIDATO: Sottrai valore vecchio se buffer pieno (buffer circolare)
+    // ? VALIDATO: Sottrai valore vecchio se buffer pieno (buffer circolare)
     if (g_hurstHistorySize == HURST_HISTORY_MAX) {
         double oldValue = g_hurstHistory[g_hurstHistoryIndex];
         g_hurstSum -= oldValue;
         g_hurstSumSq -= oldValue * oldValue;
         
-        // ✓ SANITY CHECK: protezione da errori floating point accumulati
+        // ? SANITY CHECK: protezione da errori floating point accumulati
         if (g_hurstSum < 0) g_hurstSum = 0;
         if (g_hurstSumSq < 0) g_hurstSumSq = 0;
     }
     
-    // ✓ VALIDATO: Aggiungi nuovo valore al buffer
+    // ? VALIDATO: Aggiungi nuovo valore al buffer
     g_hurstHistory[g_hurstHistoryIndex] = h;
     g_hurstSum += h;
     g_hurstSumSq += h * h;
     
-    // ✓ VALIDATO: Indice sempre nel range [0, MAX-1] grazie al modulo
+    // ? VALIDATO: Indice sempre nel range [0, MAX-1] grazie al modulo
     g_hurstHistoryIndex = (g_hurstHistoryIndex + 1) % HURST_HISTORY_MAX;
     
-    // ✓ VALIDATO: Size mai > MAX
+    // ? VALIDATO: Size mai > MAX
     if (g_hurstHistorySize < HURST_HISTORY_MAX) {
         g_hurstHistorySize++;
     }
     
     // Ricalcola CENTRO e STDEV con somme incrementali O(1)!
-    double minFractionH = GetOrganicDecayPow(g_hurstGlobal > 0 ? g_hurstGlobal : HURST_DEFAULT, 2.0);
-    int minSamples = (int)MathCeil(HURST_HISTORY_MAX * minFractionH);
+    int minSamples = (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ);  // ~38% del buffer
     if (g_hurstHistorySize >= minSamples) {
-        // ✓ VALIDATO: Divisione sicura (minSamples >= 1)
+        // ? VALIDATO: Divisione sicura (minSamples >= 1)
         g_hurstCenter = g_hurstSum / g_hurstHistorySize;
         
-        // ✓ VALIDATO: Varianza O(1) con protezione per valori negativi
+        // ? VALIDATO: Varianza O(1) con protezione per valori negativi
         double meanSq = g_hurstSumSq / g_hurstHistorySize;
         double variance = meanSq - (g_hurstCenter * g_hurstCenter);
         g_hurstStdev = (variance > 0) ? MathSqrt(variance) : 0.0;
         
-        // 🔬 Aggiorna Hurst globale
-        UpdateGlobalHurst();
-        
-        // MARGINE = stdev x decay (dinamico)
-        double globalDecay = GetOrganicDecay(g_hurstGlobal);
-        double globalScale = GetOrganicScale(g_hurstGlobal);  // 2^H
-        double newMargin = g_hurstStdev * globalDecay;
-        double minMargin = g_hurstStdev * globalDecay * globalDecay;  // decay^2 ~ 0.25
-        double maxMargin = g_hurstStdev * globalScale;  // scale(H) invece di 2.0 fisso
+        // ?? MARGINE = stdev � f?�
+        double newMargin = g_hurstStdev * PHI_INV;
+        double minMargin = g_hurstStdev * PHI_INV_SQ;
+        double maxMargin = g_hurstStdev * PHI;
         g_hurstZoneMargin = MathMax(minMargin, MathMin(maxMargin, newMargin));
         
-        // 🔬 ZONA = centro ± margine
+        // ?? ZONA = centro � margine
         g_hurstRandomLow = g_hurstCenter - g_hurstZoneMargin;
         g_hurstRandomHigh = g_hurstCenter + g_hurstZoneMargin;
-        g_hurstZoneReady = true;  // ✓ Flag: dati pronti per l'uso
+        g_hurstZoneReady = true;  // ? Flag: dati pronti per l'uso
     }
     else {
-        g_hurstZoneReady = false;  // ✓ Flag: dati NON pronti
+        g_hurstZoneReady = false;  // ? Flag: dati NON pronti
     }
 }
 
@@ -2192,7 +2031,7 @@ void InitScoreHistoryBuffer()
             ArraySize(g_scoreHistory), SCORE_HISTORY_MAX,
             ArraySize(g_scoreHistory) == SCORE_HISTORY_MAX ? "?" : "?");
         if (AutoScoreThreshold) {
-            Print("[INIT-BUFFER] Soglia score dinamica attiva: mean + stdev * decay(H)");
+            Print("[INIT-BUFFER] ?? Soglia score dinamica attiva: mean + stdev � f?�");
         } else {
             PrintFormat("[INIT-BUFFER] ?? Soglia score manuale: %.1f%%", ScoreThreshold);
         }
@@ -2358,13 +2197,12 @@ void RecalculateTradeScoreSumsFromScratch()
 //+------------------------------------------------------------------+
 double CalcOtsuThreshold()
 {
-    // Minimo campioni = periodo M5 / 3 (circa 4 per statistiche base)
-    int minSamples = MathMax(4, DEFAULT_PERIOD_M5 / 3);
+    // Minimo campioni = φ³ ≈ 4.24 → 5 (derivato da φ)
+    int minSamples = (int)MathCeil(MathPow(PHI, 3));
     if (g_scoreHistorySize < minSamples) {
-        // Fallback: percentile decay(H) dei dati esistenti (data-driven)
+        // Fallback: mediana dei dati esistenti (data-driven)
         if (g_scoreHistorySize > 0) {
-            double decayFallback = GetOrganicDecay(g_hurstGlobal);  // ~0.62 per H=0.7
-            return CalculatePercentile(g_scoreHistory, g_scoreHistorySize, decayFallback * 100.0);
+            return CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PHI_INV * 100.0);  // φ⁻¹ ≈ 61.8%
         }
         return ScoreThreshold;  // Ultimo fallback: input utente
     }
@@ -2465,19 +2303,17 @@ double CalcYoudenThreshold()
     // Trova soglia che massimizza J = TPR + TNR - 1
     double maxJ = -1.0;
     
-    // Range test DATA-DRIVEN: da decay²(H) a (1-decay²(H)) della distribuzione score
-    double decayH2Youden = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // ~0.25 per H=0.5
-    double minScoreTest = CalculatePercentile(scores, validCount, decayH2Youden * 100.0);           // ~25%
-    double maxScoreTest = CalculatePercentile(scores, validCount, (1.0 - decayH2Youden) * 100.0);  // ~75%
+    // 🌱 Range test DATA-DRIVEN: da φ⁻³ a (1-φ⁻³) della distribuzione score
+    // Invece di 10-90 fisso, usiamo i percentili reali dei dati
+    double minScoreTest = CalculatePercentile(scores, validCount, PHI_INV_CUB * 100.0);     // ~23.6%
+    double maxScoreTest = CalculatePercentile(scores, validCount, (1.0 - PHI_INV_CUB) * 100.0); // ~76.4%
     
-    // Fallback iniziale = percentile decay(H) degli score (data-driven)
-    double decayYouden = GetOrganicDecay(g_hurstGlobal);  // ~0.62 per H=0.7
-    double optimalThreshold = CalculatePercentile(scores, validCount, decayYouden * 100.0);
+    // Fallback iniziale = percentile φ⁻¹ ≈ 61.8% degli score (data-driven)
+    double optimalThreshold = CalculatePercentile(scores, validCount, PHI_INV * 100.0);
     
-    // Step = range / scale³(H) per avere ~8 test (H=0.5) o più (H alto)
-    // Minimo step = 0.1 per granularità sufficiente
-    double scale3 = GetOrganicScale(g_hurstGlobal) * GetOrganicScale(g_hurstGlobal) * GetOrganicScale(g_hurstGlobal);
-    double stepSize = MathMax(0.1, (maxScoreTest - minScoreTest) / scale3);  // scale³ ≈ 2.83 per H=0.5
+    // Step = range / φ⁴ per avere ~7 test (derivato da φ)
+    // Minimo step = φ⁻² ≈ 0.382 (derivato da φ, non 1.0 arbitrario)
+    double stepSize = MathMax(PHI_INV_SQ, (maxScoreTest - minScoreTest) / MathPow(PHI, 4));
     
     // Testa soglie nel range data-driven
     for (double threshold = minScoreTest; threshold <= maxScoreTest; threshold += stepSize) {
@@ -2511,8 +2347,8 @@ double CalcYoudenThreshold()
         }
     }
     
-    // Log se J è significativo (soglia da Hurst: decay² ≈ 0.25 per H=0.5)
-    double jLogThreshold = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // decay²(H) - J deve essere almeno questo per essere "significativo"
+    // Log se J è significativo (soglia = φ⁻³ ≈ 0.236, derivata da φ)
+    double jLogThreshold = PHI_INV_CUB;  // ~0.236 - J deve essere almeno questo per essere "significativo"
     if (g_enableLogsEffective && maxJ > jLogThreshold) {
         PrintFormat("[YOUDEN] 🎯 J=%.3f | Soglia ottimale: %.1f%% | Trades analizzati: %d (W:%d L:%d)",
             maxJ, optimalThreshold, validCount, totalPositives, totalNegatives);
@@ -2544,7 +2380,7 @@ void UpdateDynamicThreshold()
     // 🌱 FASE 1: OTSU (warm-up - separazione statistica)
     // Trova la soglia che separa naturalmente gli score in due classi
     // ═══════════════════════════════════════════════════════════════
-    int minSamplesForOtsu = GetBufferSmall();  // 8 campioni
+    int minSamplesForOtsu = (int)MathRound(MathPow(PHI, 4));  // φ⁴ ≈ 7 campioni
     
     if (g_scoreHistorySize < minSamplesForOtsu) {
         // Non abbastanza dati per Otsu: usa fallback manuale
@@ -2599,18 +2435,17 @@ void UpdateDynamicThreshold()
     g_scoreThresholdReady = true;
     
     // ═══════════════════════════════════════════════════════════════
-    // 🔒 SAFETY BOUNDS (data-driven percentili)
-    // Min: P25 ≈ 25% (sotto questo, troppi segnali)
-    // Max: P75 ≈ 75% della distribuzione
+    // 🔒 SAFETY BOUNDS (φ-derivati dai dati, non numeri fissi)
+    // Min: percentile φ⁻² ≈ 38.2% (sotto questo, troppi segnali)
+    // Max: percentile (1-φ⁻²) ≈ 61.8% degli score + buffer φ⁻¹ ≈ 85.4%
     // ═══════════════════════════════════════════════════════════════
-    int minSamplesForBounds = GetBufferSmall();  // 8 campioni minimi
+    int minSamplesForBounds = (int)MathRound(MathPow(PHI, 4));  // φ⁴ ≈ 7
     if (g_scoreHistorySize >= minSamplesForBounds) {
-        // Percentili da Hurst:
-        // Floor: decay²(H) ~ 25% della distribuzione per H=0.5
-        // Ceiling: 1-decay²(H) ~ 75% della distribuzione per H=0.5
-        double decayH2 = GetOrganicDecayPow(g_hurstGlobal, 2.0);
-        double floorPercentile = decayH2 * 100.0;           // ~25% per H=0.5
-        double ceilingPercentile = (1.0 - decayH2) * 100.0; // ~75% per H=0.5
+        // Percentili derivati da φ:
+        // Floor: φ⁻² ≈ 38.2% della distribuzione
+        // Ceiling: 1 - φ⁻³ ≈ 76.4% della distribuzione (lascia spazio per score alti)
+        double floorPercentile = PHI_INV_SQ * 100.0;           // ~38.2%
+        double ceilingPercentile = (1.0 - PHI_INV_CUB) * 100.0; // ~76.4%
         
         double minBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, floorPercentile);
         double maxBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, ceilingPercentile);
@@ -2621,12 +2456,12 @@ void UpdateDynamicThreshold()
         g_dynamicThreshold = MathMax(minBound, MathMin(maxBound, g_dynamicThreshold));
         
         if (hitFloor || hitCeiling) {
-            thresholdMethod += (hitFloor ? " | FLOOR->P25" : " | CEILING->P75");
+            thresholdMethod += (hitFloor ? " | FLOOR->P38" : " | CEILING->P76");
         }
     }
     
-    // Log se cambio significativo (soglia cambio = decay^2 ~ 0.25)
-    double logChangeThreshold = GetOrganicDecayPow(g_hurstGlobal > 0 ? g_hurstGlobal : HURST_DEFAULT, 2.0);
+    // Log se cambio significativo (soglia cambio = 1/φ³ ≈ 0.236 punti %)
+    double logChangeThreshold = PHI_INV_CUB;
     if (g_enableLogsEffective && MathAbs(g_dynamicThreshold - oldThreshold) > logChangeThreshold) {
         PrintFormat("[THRESHOLD] 🌱 Soglia: %.1f%% → %.1f%% [%s]", oldThreshold, g_dynamicThreshold, thresholdMethod);
         PrintFormat("   Otsu: %.1f%% | Youden: %.1f%% (%s) | Score buffer: %d",
@@ -2650,12 +2485,12 @@ double GetCurrentThreshold()
 }
 
 //+------------------------------------------------------------------+
-//| DETECTOR INVERSIONE: Inizializzazione buffer                  |
+//| ?? DETECTOR INVERSIONE: Inizializzazione buffer                  |
 //+------------------------------------------------------------------+
 void InitReversalDetectors()
 {
-    // Score Momentum buffer = 64 (BUFFER_SIZE_XLARGE)
-    int momentumBufferSize = GetBufferXLarge();  // 64
+    // Score Momentum buffer = f8 � 47 (stesso size di trade history)
+    int momentumBufferSize = (int)MathRound(MathPow(PHI, 8));
     ArrayResize(g_momentumHistory, momentumBufferSize);
     ArrayInitialize(g_momentumHistory, 0);
     g_momentumHistorySize = 0;
@@ -2675,38 +2510,36 @@ void InitReversalDetectors()
     g_regimeChanged = false;
     g_regimeChangeDirection = 0;
     
-    // RSI Divergence: buffer swing = 16 (BUFFER_SIZE_MEDIUM)
-    g_swingsMax = GetBufferMedium();  // 16
+    // RSI Divergence: buffer swing = f5 � 11
+    g_swingsMax = (int)MathRound(MathPow(PHI, 5));
     ArrayResize(g_swings_H1, g_swingsMax);
     g_swingsSize_H1 = 0;
     g_divergenceSignal = 0;
     g_divergenceStrength = 0.0;
     
-    // SOGLIA DIVERGENZA DATA-DRIVEN: buffer = 16 (BUFFER_SIZE_MEDIUM)
-    int divergenceBufferSize = GetBufferMedium();  // 16
+    // ?? SOGLIA DIVERGENZA DATA-DRIVEN: buffer f6 � 18
+    int divergenceBufferSize = (int)MathRound(MathPow(PHI, 6));
     ArrayResize(g_divergenceHistory, divergenceBufferSize);
     ArrayInitialize(g_divergenceHistory, 0);
     g_divergenceHistorySize = 0;
     g_divergenceHistoryIndex = 0;
     g_divergenceSum = 0.0;
     g_divergenceSumSq = 0.0;
-    // Start con decay^2 (~0.25 per H=0.5) - verrà aggiornato dai dati
-    g_divergenceMinThreshold = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
+    g_divergenceMinThreshold = PHI_INV_CUB;  // ?? Start = f?� � 23.6%
     g_divergenceThresholdReady = false;
     
-    // SOGLIA REVERSAL DATA-DRIVEN: buffer = 64 (BUFFER_SIZE_XLARGE)
-    int reversalBufferSize = GetBufferXLarge();  // 64
+    // ?? SOGLIA REVERSAL DATA-DRIVEN: buffer f8 � 47
+    int reversalBufferSize = (int)MathRound(MathPow(PHI, 8));
     ArrayResize(g_reversalStrengthHistory, reversalBufferSize);
     ArrayInitialize(g_reversalStrengthHistory, 0);
     g_reversalHistorySize = 0;
     g_reversalHistoryIndex = 0;
     g_reversalSum = 0.0;
     g_reversalSumSq = 0.0;
-    // Start con decay (~0.62 per H=0.5) - verrà aggiornato dai dati
-    g_reversalThreshold = GetOrganicDecay(HURST_DEFAULT);
+    g_reversalThreshold = PHI_INV;       // ?? Start = f?� � 61.8%
     g_reversalThresholdReady = false;
     
-    // STOCHASTIC EXTREME E OBV DIVERGENCE (v1.1)
+    // ?? STOCHASTIC EXTREME E OBV DIVERGENCE (v1.1)
     g_stochExtremeSignal = 0;
     g_stochExtremeStrength = 0.0;
     g_obvDivergenceSignal = 0;
@@ -2715,14 +2548,14 @@ void InitReversalDetectors()
     if (g_enableLogsEffective) {
         Print("");
         Print("---------------------------------------------------------------");
-        Print("DETECTOR INVERSIONE ORGANICO INIZIALIZZATO (v1.1)");
-        PrintFormat("   Score Momentum buffer: %d | Soglia: mean + stdev * decay(H)", momentumBufferSize);
+        Print("?? DETECTOR INVERSIONE ORGANICO INIZIALIZZATO (v1.1)");
+        PrintFormat("   Score Momentum buffer: %d | Soglia: mean + stdev � f?�", momentumBufferSize);
         Print("   Regime Change: traccia transizioni Hurst");
-        PrintFormat("   RSI Divergence: %d swing points | Soglia: mean + stdev * decay(H) (%s)", 
+        PrintFormat("   RSI Divergence: %d swing points | Soglia: mean + stdev � f?� (%s)", 
             g_swingsMax, enableRSI ? "ATTIVO" : "disattivo");
-        PrintFormat("   Stochastic Extreme: soglie percentili (P25/P75) (%s)", 
+        PrintFormat("   Stochastic Extreme: soglie f-derivate (23.6%% / 76.4%%) (%s)", 
             enableStoch ? "ATTIVO" : "disattivo");
-        PrintFormat("   OBV Divergence: lookback ~4 barre (%s)", 
+        PrintFormat("   OBV Divergence: lookback f� � 4 barre (%s)", 
             enableOBV ? "ATTIVO" : "disattivo");
         PrintFormat("   Divergence buffer: %d | Reversal buffer: %d", divergenceBufferSize, reversalBufferSize);
         Print("---------------------------------------------------------------");
@@ -2741,7 +2574,7 @@ int UpdateScoreMomentum(double currentScore)
     g_prevScore = currentScore;
     
     // Aggiungi al buffer storico per calcolo soglia
-    int momentumBufferMax = GetBufferXLarge();  // 64
+    int momentumBufferMax = (int)MathRound(MathPow(PHI, 8));
     
     // Sottrai valore vecchio se buffer pieno
     if (g_momentumHistorySize == momentumBufferMax) {
@@ -2761,14 +2594,14 @@ int UpdateScoreMomentum(double currentScore)
     g_momentumHistoryIndex = (g_momentumHistoryIndex + 1) % momentumBufferMax;
     if (g_momentumHistorySize < momentumBufferMax) g_momentumHistorySize++;
     
-    // Calcola soglia momentum = mean + stdev * decay(H)
-    int minSamples = GetBufferSmall();  // 8
+    // Calcola soglia momentum = mean + stdev � f?�
+    int minSamples = (int)MathRound(MathPow(PHI, 4));  // f4 � 7
     if (g_momentumHistorySize >= minSamples) {
         double mean = g_momentumSum / g_momentumHistorySize;
         double meanSq = g_momentumSumSq / g_momentumHistorySize;
         double variance = meanSq - (mean * mean);
         double stdev = (variance > 0) ? MathSqrt(variance) : 0.0;
-        g_scoreMomentumThreshold = mean + stdev * GetOrganicDecay(g_hurstGlobal);
+        g_scoreMomentumThreshold = mean + stdev * PHI_INV;
         g_momentumThresholdReady = true;
     }
     
@@ -2806,18 +2639,16 @@ int UpdateRegimeChange()
     if (!EnableHurstFilter) return 0;
     
     // Check cambio per ogni TF attivo
-    double changeScore = 0.0;  // 🌱 double per pesi data-driven
+    double changeScore = 0.0;  // ?? double per pesi organici
     
-    // 🌱 PESI DATA-DRIVEN: derivati da 2^H
-    // M5 = decay^2, H1 = decay, H4 = 1.0, D1 = scale
-    double decay = GetOrganicDecay(g_hurstGlobal);
-    double scale = GetOrganicScale(g_hurstGlobal);
-    double weightM5 = decay * decay;   // ~0.36
-    double weightH1 = decay;           // ~0.60
-    double weightH4 = 1.0;             // 1.0
-    double weightD1 = scale;           // ~1.66
+    // ?? PESI ORGANICI: derivati da potenze di f
+    // M5 = f?� � 0.38, H1 = f?� � 0.62, H4 = 1.0, D1 = f � 1.62
+    double weightM5 = PHI_INV_SQ;   // � 0.382
+    double weightH1 = PHI_INV;      // � 0.618
+    double weightH4 = 1.0;          // 1.0
+    double weightD1 = PHI;          // � 1.618
     
-    // M5 (peso decay^2 ~ 0.36)
+    // M5 (peso f?� � 0.38)
     if (g_vote_M5_active && g_hurstRegime_M5 != g_prevRegime_M5) {
         if (g_hurstRegime_M5 == HURST_TRENDING && g_prevRegime_M5 != HURST_TRENDING) 
             changeScore += weightM5;
@@ -2826,7 +2657,7 @@ int UpdateRegimeChange()
         g_prevRegime_M5 = g_hurstRegime_M5;
     }
     
-    // H1 (peso decay ~ 0.62)
+    // H1 (peso f?� � 0.62)
     if (g_vote_H1_active && g_hurstRegime_H1 != g_prevRegime_H1) {
         if (g_hurstRegime_H1 == HURST_TRENDING && g_prevRegime_H1 != HURST_TRENDING) 
             changeScore += weightH1;
@@ -2853,8 +2684,8 @@ int UpdateRegimeChange()
         g_prevRegime_D1 = g_hurstRegime_D1;
     }
     
-    // 🌱 FIX: Soglia rumore = decay²(H) (~0.25 per H=0.5)
-    double noiseThreshold = GetOrganicDecayPow(g_hurstGlobal, 2.0);
+    // 🌱 FIX: Soglia φ-derivata invece di 0.01 arbitrario
+    double noiseThreshold = MathPow(PHI_INV, 4);  // φ⁻⁴ ≈ 0.146 (soglia rumore organica)
     if (MathAbs(changeScore) > noiseThreshold) {
         g_regimeChanged = true;
         g_regimeChangeDirection = (changeScore > 0) ? 1 : -1;
@@ -2869,14 +2700,14 @@ int UpdateRegimeChange()
 }
 
 //+------------------------------------------------------------------+
-//| AGGIORNA SOGLIA DIVERGENZA DATA-DRIVEN                           |
-//| Traccia storia forze divergenza e calcola: mean + stdev * decay  |
-//| Clamp: [P25 ~ 25%, P62 ~ 62%]                                    |
+//| ?? AGGIORNA SOGLIA DIVERGENZA DATA-DRIVEN                        |
+//| Traccia storia forze divergenza e calcola: mean + stdev � f?�    |
+//| Clamp organico: [f?� � 24%, f?� � 62%]                          |
 //+------------------------------------------------------------------+
 void UpdateDivergenceThreshold(double strength)
 {
-    // Buffer size = 16 (potenza di 2)
-    int divergenceBufferMax = GetBufferMedium();  // 16
+    // Buffer size = f6 � 18
+    int divergenceBufferMax = (int)MathRound(MathPow(PHI, 6));
     
     // Sottrai valore vecchio se buffer pieno (O(1))
     if (g_divergenceHistorySize == divergenceBufferMax) {
@@ -2896,21 +2727,21 @@ void UpdateDivergenceThreshold(double strength)
     g_divergenceHistoryIndex = (g_divergenceHistoryIndex + 1) % divergenceBufferMax;
     if (g_divergenceHistorySize < divergenceBufferMax) g_divergenceHistorySize++;
     
-    // Calcola soglia: richiede minimo DEFAULT_PERIOD_M5 / 3 sample (~4)
-    int minSamples = MathMax(4, DEFAULT_PERIOD_M5 / 3);
+    // Calcola soglia: richiede minimo f� � 3 sample
+    int minSamples = (int)MathRound(PHI_SQ);
     
     if (g_divergenceHistorySize >= minSamples) {
         double mean = g_divergenceSum / g_divergenceHistorySize;
         double variance = (g_divergenceSumSq / g_divergenceHistorySize) - (mean * mean);
         double stdev = variance > 0 ? MathSqrt(variance) : 0;
         
-        // Soglia = mean + stdev * decay(H) (divergenze significativamente sopra media)
-        g_divergenceMinThreshold = mean + stdev * GetOrganicDecay(g_hurstGlobal);
+        // Soglia = mean + stdev � f?� (divergenze significativamente sopra media)
+        g_divergenceMinThreshold = mean + stdev * PHI_INV;
         
-        // Clamp data-driven: [decay^2 ~ 0.25, decay ~ 0.62]
-        double minClamp = GetOrganicDecayPow(g_hurstGlobal, 2.0);
-        double maxClamp = GetOrganicDecay(g_hurstGlobal);
-        g_divergenceMinThreshold = MathMax(minClamp, MathMin(maxClamp, g_divergenceMinThreshold));
+        // Clamp organico: [f?� � 24%, f?� � 62%]
+        // Min basso per catturare divergenze deboli ma significative
+        // Max per non essere troppo restrittivi
+        g_divergenceMinThreshold = MathMax(PHI_INV_CUB, MathMin(PHI_INV, g_divergenceMinThreshold));
         
         if (!g_divergenceThresholdReady) {
             g_divergenceThresholdReady = true;
@@ -2940,12 +2771,12 @@ int UpdateRSIDivergence()
     int ratesSize = ArraySize(tfData_H1.rates);
     int rsiSize = ArraySize(tfData_H1.rsi);
     
-    // Servono almeno 16 barre per rilevare swing
-    int minBars = GetBufferMedium();  // ~17
+    // Servono almeno f5 � 11 barre per rilevare swing
+    int minBars = (int)MathRound(MathPow(PHI, 5));
     if (ratesSize < minBars || rsiSize < minBars) return 0;
     
-    // Lookback per swing detection = DEFAULT_PERIOD_M5 / 3 (circa 4 barre)
-    int swingLookback = MathMax(3, DEFAULT_PERIOD_M5 / 3);
+    // Lookback per swing detection = f� � 4 barre
+    int swingLookback = (int)MathRound(MathPow(PHI, 3));
     
     // Cerca swing high/low recenti
     bool foundSwingHigh = false;
@@ -2954,9 +2785,9 @@ int UpdateRSIDivergence()
     double swingLowPrice = 0, swingLowRSI = 0;
     int swingHighBar = 0, swingLowBar = 0;
     
-    // Cerca swing negli ultimi 16 barre
+    // Cerca swing negli ultimi f5 barre
     for (int i = swingLookback; i < minBars - swingLookback; i++) {
-        int idx = ratesSize - 1 - i;  // Indice dalla fine (0 = più recente)
+        int idx = ratesSize - 1 - i;  // Indice dalla fine (0 = pi� recente)
         if (idx < swingLookback || idx >= ratesSize - swingLookback) continue;
         
         // Check swing high: high[i] > high di tutte le barre vicine
@@ -3043,10 +2874,10 @@ int UpdateRSIDivergence()
     
     if (foundSwingHigh && prevSwingHighPrice > 0 && prevSwingHighRSI > 0) {
         if (swingHighPrice > prevSwingHighPrice && swingHighRSI < prevSwingHighRSI) {
-            // Calcola forza divergenza (normalizzata con decay(H) come scala)
+            // Calcola forza divergenza (normalizzata con f come scala)
             double priceDiff = (swingHighPrice - prevSwingHighPrice) / prevSwingHighPrice;
             double rsiDiff = (prevSwingHighRSI - swingHighRSI) / prevSwingHighRSI;
-            calcStrength = MathMin(1.0, (priceDiff + rsiDiff) / GetOrganicDecay(g_hurstGlobal));
+            calcStrength = MathMin(1.0, (priceDiff + rsiDiff) / PHI_INV);
             
             // ?? AGGIORNA BUFFER E SOGLIA DATA-DRIVEN
             UpdateDivergenceThreshold(calcStrength);
@@ -3055,7 +2886,7 @@ int UpdateRSIDivergence()
                 g_divergenceStrength = calcStrength;
                 g_divergenceSignal = -1;  // Bearish
                 if (g_enableLogsEffective) {
-                    PrintFormat("[REVERSAL] BEARISH DIV: HH (%.5f->%.5f) + LH RSI (%.1f->%.1f) | Forza: %.0f%% > Soglia: %.0f%%",
+                    PrintFormat("[REVERSAL] ?? BEARISH DIV: HH (%.5f?%.5f) + LH RSI (%.1f?%.1f) | Forza: %.0f%% > Soglia: %.0f%%",
                         prevSwingHighPrice, swingHighPrice, prevSwingHighRSI, swingHighRSI, 
                         g_divergenceStrength * 100, g_divergenceMinThreshold * 100);
                 }
@@ -3068,10 +2899,10 @@ int UpdateRSIDivergence()
     // ---------------------------------------------------------------
     if (foundSwingLow && prevSwingLowPrice > 0 && prevSwingLowRSI > 0 && g_divergenceSignal == 0) {
         if (swingLowPrice < prevSwingLowPrice && swingLowRSI > prevSwingLowRSI) {
-            // Calcola forza divergenza (normalizzata con decay(H) come scala)
+            // Calcola forza divergenza (normalizzata con f come scala)
             double priceDiff = (prevSwingLowPrice - swingLowPrice) / prevSwingLowPrice;
             double rsiDiff = (swingLowRSI - prevSwingLowRSI) / prevSwingLowRSI;
-            calcStrength = MathMin(1.0, (priceDiff + rsiDiff) / GetOrganicDecay(g_hurstGlobal));
+            calcStrength = MathMin(1.0, (priceDiff + rsiDiff) / PHI_INV);
             
             // ?? AGGIORNA BUFFER E SOGLIA DATA-DRIVEN
             UpdateDivergenceThreshold(calcStrength);
@@ -3080,7 +2911,7 @@ int UpdateRSIDivergence()
                 g_divergenceStrength = calcStrength;
                 g_divergenceSignal = 1;  // Bullish
                 if (g_enableLogsEffective) {
-                    PrintFormat("[REVERSAL] BULLISH DIV: LL (%.5f->%.5f) + HL RSI (%.1f->%.1f) | Forza: %.0f%% > Soglia: %.0f%%",
+                    PrintFormat("[REVERSAL] ?? BULLISH DIV: LL (%.5f?%.5f) + HL RSI (%.1f?%.1f) | Forza: %.0f%% > Soglia: %.0f%%",
                         prevSwingLowPrice, swingLowPrice, prevSwingLowRSI, swingLowRSI, 
                         g_divergenceStrength * 100, g_divergenceMinThreshold * 100);
                 }
@@ -3092,10 +2923,10 @@ int UpdateRSIDivergence()
 }
 
 //+------------------------------------------------------------------+
-//| STOCHASTIC EXTREME DETECTION                                     |
-//| Rileva zone ipercomprato/ipervenduto usando soglie percentili    |
-//| Soglia ipervenduto: < P25 * 100 ~ 25%                            |
-//| Soglia ipercomprato: > P75 * 100 ~ 75%                           |
+//| ?? STOCHASTIC EXTREME DETECTION                                  |
+//| Rileva zone ipercomprato/ipervenduto usando soglie f-derivate    |
+//| Soglia ipervenduto: < f?� � 100 � 23.6%                         |
+//| Soglia ipercomprato: > (1 - f?�) � 100 � 76.4%                  |
 //| Ritorna: +1 = bullish (ipervenduto), -1 = bearish (ipercomprato)|
 //+------------------------------------------------------------------+
 int UpdateStochasticExtreme()
@@ -3119,10 +2950,9 @@ int UpdateStochasticExtreme()
     // Verifica dati validi
     if (stochK <= 0 || stochK >= 100 || stochD <= 0 || stochD >= 100) return 0;
     
-    // SOGLIE DA HURST: decay² per estremi
-    double decayH2 = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // ~0.25 per H=0.5
-    double oversoldLevel = decayH2 * 100.0;              // ~25% per H=0.5
-    double overboughtLevel = (1.0 - decayH2) * 100.0;    // ~75% per H=0.5
+    // ?? SOGLIE f-DERIVATE
+    double oversoldLevel = PHI_INV_SQ * 100.0;   // � 23.6%
+    double overboughtLevel = (1.0 - PHI_INV_SQ) * 100.0;  // � 76.4%
     
     // Forza = quanto � "estremo" rispetto alla soglia
     // Per ipervenduto: quanto � sotto 23.6%
@@ -3174,12 +3004,12 @@ int UpdateOBVDivergence()
     int ratesSize = ArraySize(tfData_H1.rates);
     int obvSize = ArraySize(tfData_H1.obv);
     
-    // Servono almeno 16 barre
-    int minBars = GetBufferMedium();  // ~17
+    // Servono almeno f5 � 11 barre
+    int minBars = (int)MathRound(MathPow(PHI, 5));
     if (ratesSize < minBars || obvSize < minBars) return 0;
     
-    // Lookback per trend detection = DEFAULT_PERIOD_M5 / 3 (circa 4 barre)
-    int lookback = MathMax(3, DEFAULT_PERIOD_M5 / 3);
+    // Lookback per trend detection = f� � 4 barre
+    int lookback = (int)MathRound(MathPow(PHI, 3));
     
     int lastIdx = ratesSize - 1;
     if (lastIdx < lookback) return 0;
@@ -3198,9 +3028,8 @@ int UpdateOBVDivergence()
     
     double obvChange = (obvNow - obvPrev) / MathAbs(obvPrev);
     
-    // 🌱 SOGLIA MINIMA per considerare movimento significativo: decay²(H) / 100
-    // Per H=0.5: ~0.25/100 = 0.0025 (0.25%), per H=0.7: ~0.38/100 = 0.0038 (0.38%)
-    double minChange = GetOrganicDecayPow(g_hurstGlobal, 2.0) / 100.0;
+    // ?? SOGLIA MINIMA per considerare movimento significativo: f?� � 0.236%
+    double minChange = PHI_INV_CUB * 0.01;  // 0.00236
     
     if (MathAbs(priceChange) < minChange || MathAbs(obvChange) < minChange) return 0;
     
@@ -3209,7 +3038,7 @@ int UpdateOBVDivergence()
     // ---------------------------------------------------------------
     if (priceChange > 0 && obvChange < 0) {
         // Forza = media normalizzata dei due cambiamenti
-        g_obvDivergenceStrength = MathMin(1.0, (priceChange - obvChange) / GetOrganicDecay(g_hurstGlobal));
+        g_obvDivergenceStrength = MathMin(1.0, (priceChange - obvChange) / PHI_INV);
         g_obvDivergenceSignal = -1;  // Bearish
         
         if (g_enableLogsEffective) {
@@ -3221,7 +3050,7 @@ int UpdateOBVDivergence()
     // BULLISH DIVERGENCE: Prezzo scende, OBV sale
     // ---------------------------------------------------------------
     else if (priceChange < 0 && obvChange > 0) {
-        g_obvDivergenceStrength = MathMin(1.0, (obvChange - priceChange) / GetOrganicDecay(g_hurstGlobal));
+        g_obvDivergenceStrength = MathMin(1.0, (obvChange - priceChange) / PHI_INV);
         g_obvDivergenceSignal = 1;  // Bullish
         
         if (g_enableLogsEffective) {
@@ -3234,11 +3063,11 @@ int UpdateOBVDivergence()
 }
 
 //+------------------------------------------------------------------+
-//| DETECTOR INVERSIONE MASTER: Combina tutti i segnali              |
+//| ?? DETECTOR INVERSIONE MASTER: Combina tutti i segnali           |
 //| Ritorna: +1 inversione bullish, -1 bearish, 0 nessuna            |
 //| strength: 0-1 forza del segnale                                  |
-//| SOGLIA 100% DATA-DRIVEN: mean + stdev * decay(H)                 |
-//| v1.1: Include Stochastic Extreme e OBV Divergence                |
+//| ?? SOGLIA 100% DATA-DRIVEN: mean + stdev � f?�                   |
+//| ?? v1.1: Include Stochastic Extreme e OBV Divergence             |
 //+------------------------------------------------------------------+
 int GetReversalSignal(double &strength)
 {
@@ -3255,21 +3084,20 @@ int GetReversalSignal(double &strength)
     int obvDivergenceSignal = g_obvDivergenceSignal;
     
     // ---------------------------------------------------------------
-    // LOGICA COMBINATA (pesi organici Hurst-driven)
-    // RSI Divergence = peso scale(H) (piu affidabile, classico)
+    // LOGICA COMBINATA (pesi organici f-derivati)
+    // RSI Divergence = peso f (pi� affidabile, classico)
     // OBV Divergence = peso 1 (volume conferma)
-    // Stoch Extreme = peso decay(H) (zone estreme)
-    // Momentum = peso decay^2 (rapido ma rumoroso)
-    // Regime = peso decay^2 (confirmation)
+    // Stoch Extreme = peso f?� (zone estreme)
+    // Momentum = peso f?� (rapido ma rumoroso)
+    // Regime = peso f?� (confirmation)
     // ---------------------------------------------------------------
     double score = 0.0;
     double maxScore = 0.0;
     
-    // Divergenza RSI (peso piu alto - classico e affidabile)
+    // Divergenza RSI (peso pi� alto - classico e affidabile)
     if (divergenceSignal != 0) {
-        double scale = GetOrganicScale(g_hurstGlobal);
-        score += divergenceSignal * scale * g_divergenceStrength;
-        maxScore += scale;
+        score += divergenceSignal * PHI * g_divergenceStrength;
+        maxScore += PHI;
     }
     
     // Divergenza OBV (volume non mente - peso 1)
@@ -3278,25 +3106,22 @@ int GetReversalSignal(double &strength)
         maxScore += 1.0;
     }
     
-    // Stochastic Zone Estreme (peso decay(H))
+    // Stochastic Zone Estreme (peso f?� � 0.618)
     if (stochExtremeSignal != 0) {
-        double decay = GetOrganicDecay(g_hurstGlobal);
-        score += stochExtremeSignal * decay * g_stochExtremeStrength;
-        maxScore += decay;
+        score += stochExtremeSignal * PHI_INV * g_stochExtremeStrength;
+        maxScore += PHI_INV;
     }
     
-    // Score Momentum (peso decay^2)
+    // Score Momentum (peso ridotto a f?�)
     if (momentumStrong) {
-        double decaySq = GetOrganicDecayPow(g_hurstGlobal, 2);
-        score += momentumSignal * decaySq;
-        maxScore += decaySq;
+        score += momentumSignal * PHI_INV_SQ;
+        maxScore += PHI_INV_SQ;
     }
     
-    // Regime Change (peso decay^2)
+    // Regime Change (peso f?�)
     if (regimeSignal != 0) {
-        double decaySq = GetOrganicDecayPow(g_hurstGlobal, 2);
-        score += regimeSignal * decaySq;
-        maxScore += decaySq;
+        score += regimeSignal * PHI_INV_SQ;
+        maxScore += PHI_INV_SQ;
     }
     
     if (maxScore <= 0) return 0;
@@ -3305,10 +3130,10 @@ int GetReversalSignal(double &strength)
     strength = MathAbs(score) / maxScore;
     
     // ---------------------------------------------------------------
-    // AGGIORNA BUFFER STORICO FORZA REVERSAL (per soglia data-driven)
+    // ?? AGGIORNA BUFFER STORICO FORZA REVERSAL (per soglia data-driven)
     // Tracciamo TUTTE le forze (anche deboli) per avere distribuzione completa
     // ---------------------------------------------------------------
-    int reversalBufferMax = GetBufferXLarge();  // 64
+    int reversalBufferMax = (int)MathRound(MathPow(PHI, 8));  // f8 � 47
     
     // Sottrai valore vecchio se buffer pieno (O(1))
     if (g_reversalHistorySize == reversalBufferMax) {
@@ -3329,23 +3154,21 @@ int GetReversalSignal(double &strength)
     if (g_reversalHistorySize < reversalBufferMax) g_reversalHistorySize++;
     
     // ---------------------------------------------------------------
-    // 🌱 CALCOLA SOGLIA DATA-DRIVEN: mean + stdev * decay(H)
-    // Richiede minimo DEFAULT_PERIOD_M5 / 3 sample (~4) per statistiche base
+    // ?? CALCOLA SOGLIA DATA-DRIVEN: mean + stdev � f?�
+    // Richiede minimo f� � 4 sample per significativit� statistica
     // ---------------------------------------------------------------
-    int minSamples = MathMax(4, DEFAULT_PERIOD_M5 / 3);
+    int minSamples = (int)MathRound(MathPow(PHI, 3));  // � 4
     
     if (g_reversalHistorySize >= minSamples) {
         double mean = g_reversalSum / g_reversalHistorySize;
         double variance = (g_reversalSumSq / g_reversalHistorySize) - (mean * mean);
         double stdev = variance > 0 ? MathSqrt(variance) : 0;
         
-        // Soglia = mean + stdev * decay(H) (segnali significativamente sopra media)
-        g_reversalThreshold = mean + stdev * GetOrganicDecay(g_hurstGlobal);
+        // Soglia = mean + stdev � f?� (segnali significativamente sopra media)
+        g_reversalThreshold = mean + stdev * PHI_INV;
         
-        // Clamp data-driven: soglia minima decay²(H), massima decay(H)
-        double decayClampMin = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // ~0.25 per H=0.5
-        double decayClampMax = GetOrganicDecay(g_hurstGlobal);           // ~0.62 per H=0.5
-        g_reversalThreshold = MathMax(decayClampMin, MathMin(decayClampMax, g_reversalThreshold));
+        // Clamp organico: soglia minima f?� � 38%, massima f?� � 62%
+        g_reversalThreshold = MathMax(PHI_INV_SQ, MathMin(PHI_INV, g_reversalThreshold));
         
         if (!g_reversalThresholdReady) {
             g_reversalThresholdReady = true;
@@ -3381,11 +3204,11 @@ int GetReversalSignal(double &strength)
 }
 
 //+------------------------------------------------------------------+
-//| Calcola il PERIODO NATURALE del mercato per un TF                |
+//| ?? Calcola il PERIODO NATURALE del mercato per un TF             |
 //| Usa AUTOCORRELAZIONE per trovare il "memory decay" del prezzo    |
-//| Il periodo naturale e dove l'autocorr scende sotto decay(H)      |
+//| Il periodo naturale � dove l'autocorr scende sotto 1/f� � 0.382  |
 //| Ritorna anche l'ESPONENTE DI HURST per calcolo pesi              |
-//| Questo e COMPLETAMENTE derivato dai dati, zero numeri arbitrari  |
+//| Questo � COMPLETAMENTE derivato dai dati, zero numeri arbitrari  |
 //+------------------------------------------------------------------+
 NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
 {
@@ -3404,18 +3227,18 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     // 3. Il periodo naturale emerge dall'autocorrelazione
     // Se non ci sono abbastanza dati, ritorna valid=false (TF disabilitato)
     // 
-    // 🌱 FIX: In backtest, Bars() ritorna solo le barre "generate" fino a quel momento
+    // ?? FIX: In backtest, Bars() ritorna solo le barre "generate" fino a quel momento
     // Invece usiamo CopyRates con start dalla barra 1 (passato) per forzare
     // il caricamento dei dati storici pre-esistenti!
     // ---------------------------------------------------------------
     
-    // 🌱 FIX: Richiediamo 128 barre storiche (potenza di 2, sufficiente per analisi)
-    int barsToRequest = GetBufferHuge();  // 128
+    // ?? FIX: Richiediamo f�� � 123 barre storiche (sufficiente per analisi)
+    int barsToRequest = (int)MathRound(MathPow(PHI, 10));  // � 123
     
-    // 🌱 Minimo PURO: 8 barre (sotto questo non ha senso statistico)
-    int minBarsForAnalysis = GetBufferSmall();  // 8
+    // ?? Minimo PURO: f4 � 7 barre (sotto questo non ha senso statistico)
+    int minBarsForAnalysis = (int)MathRound(PHI_SQ * PHI_SQ);  // � 6.85 ? 7
     
-    // 🌱 FIX: Usa CopyRates DIRETTAMENTE per caricare dati storici
+    // ?? FIX: Usa CopyRates DIRETTAMENTE per caricare dati storici
     // In backtest, questo forza MT5 a caricare i dati dal passato!
     // Usiamo start=1 (barra precedente) per evitare la barra corrente incompleta
     int copied = CopyRates(_Symbol, tf, 1, barsToRequest, rates);
@@ -3429,10 +3252,10 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     // ?? FIX: barsAvailable = numero EFFETTIVO di barre copiate (non Bars()!)
     int barsAvailable = copied;
     
-    // 🌱 maxLag = barre / 3 (proporzione ragionevole delle barre disponibili)
+    // ?? maxLag = barre / f� (proporzione aurea delle barre disponibili)
     // Questo assicura sempre abbastanza dati per l'analisi
-    int maxLag = barsAvailable / 3;
-    maxLag = MathMax(3, maxLag);  // Minimo 3 per analisi sensata
+    int maxLag = (int)MathRound(barsAvailable / PHI_SQ);
+    maxLag = MathMax((int)MathRound(PHI_SQ), maxLag);  // Minimo f� � 3 per analisi sensata
     
     // Log solo la prima volta per confermare che i dati storici sono caricati
     static bool loggedOnce_M5 = false, loggedOnce_H1 = false, loggedOnce_H4 = false, loggedOnce_D1 = false;
@@ -3451,7 +3274,7 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     // ---------------------------------------------------------------
     // CALCOLO AUTOCORRELAZIONE
     // L'autocorrelazione misura quanto il prezzo "ricorda" se stesso
-    // Quando scende sotto decay(H), il mercato ha "dimenticato"
+    // Quando scende sotto 1/f� � 0.382, il mercato ha "dimenticato"
     // ---------------------------------------------------------------
     
     // Calcola media dei close
@@ -3477,8 +3300,8 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     // ---------------------------------------------------------------
     // ?? CALCOLA ESPONENTE DI HURST (per determinare peso TF)
     // Confrontato con g_hurstCenter e soglie dinamiche:
-    //   H > g_hurstRandomHigh: trending → peso maggiore
-    //   H < g_hurstRandomLow: mean-reverting → peso maggiore
+    //   H > g_hurstRandomHigh: trending ? peso maggiore
+    //   H < g_hurstRandomLow: mean-reverting ? peso maggiore
     // ---------------------------------------------------------------
     double hurstValue = CalculateHurstExponent(rates, copied);
     
@@ -3486,10 +3309,10 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     double autocorrSum = 0;
     int autocorrCount = 0;
     
-    // Trova il lag dove l'autocorrelazione scende sotto decay(H)
-    // Questo è il "periodo naturale" del mercato
+    // Trova il lag dove l'autocorrelazione scende sotto 1/f�
+    // Questo � il "periodo naturale" del mercato
     int naturalPeriod = 0;
-    double threshold = GetOrganicDecay(g_hurstGlobal);  // ~0.62 per H=0.7 (soglia da Hurst!)
+    double threshold = PHI_INV_SQ;  // � 0.382 (soglia organica!)
     double autocorrAtNaturalPeriod = 0;
     
     for (int lag = 1; lag < MathMin(maxLag, copied / 2); lag++) {
@@ -3531,23 +3354,22 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
         naturalPeriod = FindAutocorrelationMinimum(rates, copied, maxLag);
         
         if (naturalPeriod == 0) {
-            // Derivato dalle barre disponibili: maxLag / 2
-            naturalPeriod = maxLag / 2;
-            PrintFormat("[NATURAL] 🌱 TF %s: nessun decay trovato, uso maxLag/2=%d", 
+            // Derivato dalle barre disponibili: maxLag / f
+            naturalPeriod = (int)MathRound(maxLag / PHI);
+            PrintFormat("[NATURAL] ?? TF %s: nessun decay trovato, uso maxLag/f�%d", 
                 EnumToString(tf), naturalPeriod);
         }
     }
     
-    // 🌱 Limita il periodo con proporzioni ragionevoli delle barre disponibili
-    // minPeriod = 2 è un requisito TECNICO (minimo per calcolare variazione)
-    int minPeriod = 2;              // Requisito tecnico: servono almeno 2 punti
-    int maxPeriod = maxLag / 2;     // Derivato dalle barre
+    // ?? Limita il periodo con rapporti aurei delle barre disponibili
+    int minPeriod = (int)MathRound(PHI);              // � 2 (minimo assoluto)
+    int maxPeriod = (int)MathRound(maxLag / PHI);     // Derivato dalle barre
     naturalPeriod = MathMax(minPeriod, MathMin(maxPeriod, naturalPeriod));
     
     // ---------------------------------------------------------------
-    // 🌱 ESPONENTE DI HURST DETERMINA IL PESO TF
-    // peso_TF = H_TF / Σ(H_tutti_TF) - normalizzato
-    // TF con H più alto contribuiscono maggiormente
+    // ?? ESPONENTE DI HURST DETERMINA IL PESO TF
+    // peso_TF = H_TF / S(H_tutti_TF) - normalizzato
+    // TF con H pi� alto contribuiscono maggiormente
     // ---------------------------------------------------------------
     // ?? FIX: Se Hurst ritorna -1 (dati insufficienti), non � valido
     if (hurstValue < 0) {
@@ -3612,7 +3434,7 @@ int FindAutocorrelationMinimum(MqlRates &rates[], int n, int maxLag)
             // Minimo locale: prev < prevPrev AND prev < current
             if (prevAutocorr < prevPrevAutocorr && prevAutocorr < autocorr) {
                 if (g_enableLogsEffective) {
-                    PrintFormat("[NATURAL] Minimo autocorr trovato a lag=%d (autocorr=%.3f)", 
+                    PrintFormat("[NATURAL] ?? Minimo autocorr trovato a lag=%d (autocorr=%.3f)", 
                         lag - 1, prevAutocorr);
                 }
                 return lag - 1;
@@ -3627,7 +3449,7 @@ int FindAutocorrelationMinimum(MqlRates &rates[], int n, int maxLag)
 }
 
 //+------------------------------------------------------------------+
-//| CALCOLA PERCENTILE dai dati                                      |
+//| ?? CALCOLA PERCENTILE dai dati                                   |
 //| Deriva le soglie dalla distribuzione REALE, non da numeri fissi  |
 //+------------------------------------------------------------------+
 double CalculatePercentile(const double &arr[], int size, double percentile)
@@ -3653,177 +3475,8 @@ double CalculatePercentile(const double &arr[], int size, double percentile)
 }
 
 //+------------------------------------------------------------------+
-//| CALCOLA MEDIANA                                                  |
-//| Robusto agli outlier - ideale per regime RANDOM                  |
-//+------------------------------------------------------------------+
-double CalculateMedian(const double &arr[], int size)
-{
-    if (size <= 0) return 0;
-    
-    // Copia e ordina
-    double sorted[];
-    ArrayResize(sorted, size);
-    for (int i = 0; i < size; i++) sorted[i] = arr[i];
-    ArraySort(sorted);
-    
-    // Mediana
-    if (size % 2 == 1) {
-        return sorted[size / 2];
-    } else {
-        return (sorted[size / 2 - 1] + sorted[size / 2]) / 2.0;
-    }
-}
-
-//+------------------------------------------------------------------+
-//| CALCOLA MEDIA TRONCATA (Trimmed Mean)                            |
-//| Scarta il 10% estremi - ideale per regime MEAN-REVERTING         |
-//| Cattura il vero centro di oscillazione                           |
-//+------------------------------------------------------------------+
-double CalculateTrimmedMean(const double &arr[], int size, double trimPercent = 0.10)
-{
-    if (size <= 0) return 0;
-    if (size < 5) return CalculateEmpiricalMean(arr, size);  // Fallback per pochi dati
-    
-    // Copia e ordina
-    double sorted[];
-    ArrayResize(sorted, size);
-    for (int i = 0; i < size; i++) sorted[i] = arr[i];
-    ArraySort(sorted);
-    
-    // Calcola quanti elementi troncare da ogni lato
-    int trimCount = (int)MathFloor(size * trimPercent);
-    trimCount = MathMax(1, trimCount);  // Almeno 1 per lato
-    
-    // Verifica che rimangano abbastanza elementi
-    int remaining = size - 2 * trimCount;
-    if (remaining < 2) {
-        trimCount = (size - 2) / 2;
-        remaining = size - 2 * trimCount;
-    }
-    
-    // Media dei valori centrali
-    double sum = 0;
-    for (int i = trimCount; i < size - trimCount; i++) {
-        sum += sorted[i];
-    }
-    
-    return sum / remaining;
-}
-
-//+------------------------------------------------------------------+
-//| CALCOLA EMA (Exponential Moving Average)                         |
-//| Dati recenti pesano di piu - ideale per regime TRENDING          |
-//+------------------------------------------------------------------+
-double CalculateEMA(const double &arr[], int size, double alpha)
-{
-    if (size <= 0) return 0;
-    if (size == 1) return arr[0];
-    
-    // Limita alpha tra 0.01 e 0.99
-    alpha = MathMax(0.01, MathMin(0.99, alpha));
-    
-    // EMA: inizia dal primo valore e procede verso il piu recente
-    // arr[0] = piu vecchio, arr[size-1] = piu recente
-    double ema = arr[0];
-    for (int i = 1; i < size; i++) {
-        ema = alpha * arr[i] + (1.0 - alpha) * ema;
-    }
-    
-    return ema;
-}
-
-//+------------------------------------------------------------------+
-//| CALCOLA CENTRO ADATTIVO HURST-DRIVEN con Smoothing               |
-//|                                                                  |
-//| TRENDING (H > 0.55):      EMA (recency bias)                     |
-//| RANDOM (0.45-0.55):       Mediana (robustezza)                   |
-//| MEAN-REVERTING (H < 0.45): Media troncata (centro vero)          |
-//|                                                                  |
-//| Smoothing: transizione graduale nelle zone di confine            |
-//| - Evita discontinuita quando H attraversa le soglie              |
-//| - Blend lineare tra metodi adiacenti                             |
-//+------------------------------------------------------------------+
-double CalculateAdaptiveCenter(const double &arr[], int size, double H)
-{
-    if (size <= 0) return 0;
-    if (size < 4) return CalculateEmpiricalMean(arr, size);  // Fallback per pochi dati
-    
-    // 🌱 SOGLIE DI REGIME DERIVATE DAL CENTRO HURST EMPIRICO
-    // Invece di usare 0.40, 0.45, 0.55, 0.60 fissi, deriviamo da g_hurstCenter ± margine
-    double center_H = g_hurstZoneReady ? g_hurstCenter : HURST_DEFAULT;  // Centro empirico o 0.5
-    // Margine fallback = decay²(H) ~ 0.25 per H=0.5, scalato a ~0.05 tipico
-    double margin_H = g_hurstZoneReady ? g_hurstZoneMargin : GetOrganicDecayPow(HURST_DEFAULT, 2.0) * 0.2;
-    
-    // Soglie derivate: centro ± margine e centro ± margine/2
-    double H_TRENDING_HIGH = center_H + margin_H;        // Limite superiore zona random
-    double H_TRENDING_LOW = center_H + margin_H * 0.5;   // Inizio transizione trending
-    double H_REVERTING_HIGH = center_H - margin_H * 0.5; // Fine transizione reverting
-    double H_REVERTING_LOW = center_H - margin_H;        // Limite inferiore zona random
-    
-    // Clamp alle soglie basate su HURST_RANGE (no valori fissi)
-    // Range sensato: [HURST_RANGE_MIN + margin, HURST_RANGE_MAX - margin]
-    double clampMin = HURST_RANGE_MIN + margin_H;  // ~0.15 per margin=0.05
-    double clampMax = HURST_RANGE_MAX - margin_H;  // ~0.85 per margin=0.05
-    H_TRENDING_HIGH = MathMax(center_H, MathMin(clampMax, H_TRENDING_HIGH));
-    H_TRENDING_LOW = MathMax(center_H - margin_H, MathMin(clampMax - margin_H, H_TRENDING_LOW));
-    H_REVERTING_HIGH = MathMax(clampMin + margin_H, MathMin(center_H, H_REVERTING_HIGH));
-    H_REVERTING_LOW = MathMax(clampMin, MathMin(center_H - margin_H, H_REVERTING_LOW));
-    
-    // Pre-calcola tutti i centri (alcuni potrebbero non servire, ma sono veloci)
-    double decay = GetOrganicDecay(H);
-    double alpha = decay;  // alpha = 2^(-H) ~ 0.6-0.7 per H tipico
-    
-    double centerEMA = CalculateEMA(arr, size, alpha);
-    double centerMedian = CalculateMedian(arr, size);
-    // 🌱 trimPercent = decay^2(H) ~ 0.25 per H=0.5, meno per H alto
-    double trimPercent = GetOrganicDecayPow(H, 2.0) * 0.5;  // ~12.5% per H=0.5
-    double centerTrimmed = CalculateTrimmedMean(arr, size, trimPercent);
-    
-    double center = 0;
-    
-    // ═══════════════════════════════════════════════════════════════
-    // ZONA TRENDING PURO (H >= H_TRENDING_HIGH)
-    // ═══════════════════════════════════════════════════════════════
-    if (H >= H_TRENDING_HIGH) {
-        center = centerEMA;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // ZONA TRANSIZIONE TRENDING→RANDOM (H_TRENDING_LOW <= H < H_TRENDING_HIGH)
-    // Blend lineare: EMA → Mediana
-    // ═══════════════════════════════════════════════════════════════
-    else if (H >= H_TRENDING_LOW) {
-        double range = H_TRENDING_HIGH - H_TRENDING_LOW;
-        double weight_ema = (range > 0.001) ? (H - H_TRENDING_LOW) / range : 0.5;
-        center = weight_ema * centerEMA + (1.0 - weight_ema) * centerMedian;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // ZONA RANDOM PURA (H_REVERTING_HIGH <= H < H_TRENDING_LOW)
-    // ═══════════════════════════════════════════════════════════════
-    else if (H >= H_REVERTING_HIGH) {
-        center = centerMedian;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // ZONA TRANSIZIONE RANDOM→REVERTING (H_REVERTING_LOW <= H < H_REVERTING_HIGH)
-    // Blend lineare: Mediana → Trimmed Mean
-    // ═══════════════════════════════════════════════════════════════
-    else if (H >= H_REVERTING_LOW) {
-        double range = H_REVERTING_HIGH - H_REVERTING_LOW;
-        double weight_median = (range > 0.001) ? (H - H_REVERTING_LOW) / range : 0.5;
-        center = weight_median * centerMedian + (1.0 - weight_median) * centerTrimmed;
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // ZONA MEAN-REVERTING PURA (H < H_REVERTING_LOW)
-    // ═══════════════════════════════════════════════════════════════
-    else {
-        center = centerTrimmed;
-    }
-    
-    return center;
-}
-
-//+------------------------------------------------------------------+
-//| CALCOLA MEDIA EMPIRICA (mantenuta per retrocompatibilita)        |
-//| Ritorna: mean(arr) = somma(valori) / N                           |
+//| ?? CALCOLA MEDIA EMPIRICA                                        |
+//| Ritorna: mean(arr) = somma(valori) / N                          |
 //+------------------------------------------------------------------+
 double CalculateEmpiricalMean(const double &arr[], int size)
 {
@@ -3835,12 +3488,12 @@ double CalculateEmpiricalMean(const double &arr[], int size)
 }
 
 //+------------------------------------------------------------------+
-//| CALCOLA DEVIAZIONE STANDARD                                      |
-//| La scala REALE dipende dalla volatilita storica dell'indicatore  |
+//| ?? CALCOLA DEVIAZIONE STANDARD                                   |
+//| La scala REALE dipende dalla volatilit� storica dell'indicatore  |
 //+------------------------------------------------------------------+
 double CalculateEmpiricalStdDev(const double &arr[], int size, double mean)
 {
-    // PURO: ritorna 0 se dati insufficienti - il chiamante gestira l'errore
+    // ?? PURO: ritorna 0 se dati insufficienti - il chiamante gestir� l'errore
     if (size <= 1) return 0.0;
     
     double sumSq = 0;
@@ -3852,12 +3505,8 @@ double CalculateEmpiricalStdDev(const double &arr[], int size, double mean)
 }
 
 //+------------------------------------------------------------------+
-//| CALCOLA SOGLIE EMPIRICHE per un TimeFrame - HURST-ADATTIVO       |
+//| ?? CALCOLA SOGLIE EMPIRICHE per un TimeFrame - PURO              |
 //| Tutti i centri e scale derivano dai DATI storici reali           |
-//| Centro calcolato con metodo adattivo al regime Hurst:            |
-//|   TRENDING (H>0.55):     EMA (recency)                           |
-//|   RANDOM (0.45-0.55):    Mediana (robustezza)                    |
-//|   REVERTING (H<0.45):    Trimmed Mean (centro vero)              |
 //| Se i dati sono insufficienti, INVALIDA il TF (no fallback!)      |
 //| Ritorna: true se calcolo OK, false se dati insufficienti         |
 //+------------------------------------------------------------------+
@@ -3866,12 +3515,13 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
     int size = ArraySize(data.rsi);
     int n = MathMin(lookback, size);
     
-    // MINIMO: DEFAULT_PERIOD_M5 / 3 barre (minimo per statistiche sensate)
-    int minBarsRequired = MathMax(4, DEFAULT_PERIOD_M5 / 3);
+    // ?? MINIMO PURO: f� � 4 (minimo per statistiche sensate)
+    // Questo � l'UNICO "numero magico" ed � derivato da f
+    int minBarsRequired = (int)MathRound(PHI * PHI * PHI);  // � 4.236 ? 4
     
     if (n < minBarsRequired) {
-        // DATI INSUFFICIENTI - NON USARE FALLBACK, INVALIDA IL TF
-        Print("[EMPIRICAL] DATI INSUFFICIENTI! Richieste almeno ", minBarsRequired, 
+        // ? DATI INSUFFICIENTI - NON USARE FALLBACK, INVALIDA IL TF
+        Print("? [EMPIRICAL] DATI INSUFFICIENTI! Richieste almeno ", minBarsRequired, 
               " barre, disponibili: ", n, " - TF DISABILITATO");
         
         // Azzera tutto per evitare uso accidentale
@@ -3884,52 +3534,45 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
     }
     
     // ---------------------------------------------------------------
-    // CENTRI ADATTIVI HURST-DRIVEN con Smoothing
-    // Il metodo di stima cambia in base al regime di mercato
+    // ?? CENTRI EMPIRICI - La media REALE dal mercato
     // ---------------------------------------------------------------
     
     // RSI: prepara array delle ultime n barre
     double rsi_data[];
     ArrayResize(rsi_data, n);
     for (int i = 0; i < n; i++) rsi_data[i] = data.rsi[size - n + i];
-    
-    // NUOVO: Centro adattivo invece di media semplice
-    data.rsi_center = CalculateAdaptiveCenter(rsi_data, n, g_hurstGlobal);
-    
-    // StdDev calcolata rispetto al centro adattivo
+    data.rsi_center = CalculateEmpiricalMean(rsi_data, n);
     double rsi_stdev = CalculateEmpiricalStdDev(rsi_data, n, data.rsi_center);
     if (rsi_stdev <= 0) {
-        Print("[EMPIRICAL] RSI stdev=0, dati flat - TF DISABILITATO");
+        Print("? [EMPIRICAL] RSI stdev=0, dati flat - TF DISABILITATO");
         return false;
     }
-    data.rsi_scale = rsi_stdev * GetOrganicScale(g_hurstGlobal);  // Scala = stdev * 2^H
+    data.rsi_scale = rsi_stdev * PHI;  // Scala = stdev � f
     
     // ---------------------------------------------------------------
-    // ADX PERCENTILI - Soglie dalla distribuzione REALE con Hurst
+    // ?? ADX PERCENTILI - Soglie dalla distribuzione REALE
     // ---------------------------------------------------------------
     if (ArraySize(data.adx) >= n) {
         double adx_data[];
         ArrayResize(adx_data, n);
         for (int i = 0; i < n; i++) adx_data[i] = data.adx[size - n + i];
         
-        // Percentili da Hurst: decay²(H) e decay(H)
-        double decayH2ADX = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // ~0.25 per H=0.5
-        double decayHADX = GetOrganicDecay(g_hurstGlobal);           // ~0.62 per H=0.7
-        data.adx_p25 = CalculatePercentile(adx_data, n, decayH2ADX * 100);  // ~25° percentile
-        data.adx_p75 = CalculatePercentile(adx_data, n, decayHADX * 100);   // ~62° percentile
+        // Percentili aurei: 1/f� � 38.2% e 1/f � 61.8%
+        data.adx_p25 = CalculatePercentile(adx_data, n, PHI_INV_SQ * 100);  // ~38� percentile
+        data.adx_p75 = CalculatePercentile(adx_data, n, PHI_INV * 100);     // ~62� percentile
         
         // Verifica che i percentili siano sensati (p75 > p25)
         if (data.adx_p75 <= data.adx_p25) {
-            Print("[EMPIRICAL] ADX percentili invalidi (p75 <= p25) - TF DISABILITATO");
+            Print("? [EMPIRICAL] ADX percentili invalidi (p75 <= p25) - TF DISABILITATO");
             return false;
         }
     } else {
-        Print("[EMPIRICAL] ADX: dati insufficienti");
+        Print("? [EMPIRICAL] ADX: dati insufficienti");
         return false;
     }
     
     // ---------------------------------------------------------------
-    // FIX: OBV SCALA EMPIRICA - Dalle variazioni REALI
+    // ?? FIX: OBV SCALA EMPIRICA - Dalle variazioni REALI
     // Calcola la stdev delle VARIAZIONI di OBV (non i valori assoluti)
     // ---------------------------------------------------------------
     int obvSize = ArraySize(data.obv);
@@ -3943,11 +3586,11 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
         double obv_change_mean = CalculateEmpiricalMean(obv_changes, n - 1);
         double obv_change_stdev = CalculateEmpiricalStdDev(obv_changes, n - 1, obv_change_mean);
         
-        // Scala = stdev * scale(H), con fallback se troppo piccola
+        // Scala = stdev � f, con fallback se troppo piccola
         if (obv_change_stdev > 0) {
-            data.obv_scale = obv_change_stdev * GetOrganicScale(g_hurstGlobal);
+            data.obv_scale = obv_change_stdev * PHI;
         } else {
-            // FIX: Fallback migliorato - usa range OBV osservato
+            // ?? FIX: Fallback migliorato - usa range OBV osservato invece di ATR
             double obv_max = data.obv[startIdx];
             double obv_min = data.obv[startIdx];
             for (int i = 1; i < n; i++) {
@@ -3955,202 +3598,161 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
                 if (data.obv[startIdx + i] < obv_min) obv_min = data.obv[startIdx + i];
             }
             double obv_range = obv_max - obv_min;
-            // Scala = range / (scale(H)^2 * sqrt(n)) - derivato da Hurst!
-            double hScale = GetOrganicScale(g_hurstGlobal);  // 2^H
-            double divisor = hScale * hScale * MathSqrt((double)n);  // scale^2 * sqrt(n)
+            // Scala = range / (φ³ × sqrt(n)) come stima della variazione tipica
+            double divisor = MathPow(PHI, 3) * MathSqrt((double)n);
             if (divisor > 0 && obv_range > 0) {
                 data.obv_scale = obv_range / divisor;
             } else {
-                // FIX: Fallback = 128 (potenza di 2 coerente)
-                data.obv_scale = GetBufferHuge();  // 128
+                // 🌱 FIX: Fallback φ-derivato invece di 1000.0 arbitrario
+                data.obv_scale = MathPow(PHI, 10);  // φ¹⁰ ≈ 123 (coerente con altri fallback)
             }
         }
-        // FIX: Garantire sempre scala minima positiva per evitare DIV/0
+        // ?? FIX: Garantire sempre scala minima positiva per evitare DIV/0
         if (data.obv_scale <= 0) {
-            data.obv_scale = GetBufferLarge();  // Minimo = 32
+            data.obv_scale = MathPow(PHI, 7);  // ?? Minimo = f7 � 29
         }
     } else {
-        // OBV non disponibile, usa fallback
-        data.obv_scale = GetBufferHuge();  // 128 (valore tipico per volumi)
+        // OBV non disponibile, usa fallback organico
+        data.obv_scale = MathPow(PHI, 10);  // ?? f�� � 123 (valore tipico per volumi)
     }
     
     if (g_enableLogsEffective) {
-        // Determina quale metodo e stato usato per il centro
-        // Soglie derivate da g_hurstCenter ± g_hurstZoneMargin
-        double center_H = g_hurstZoneReady ? g_hurstCenter : HURST_DEFAULT;
-        double margin_H = g_hurstZoneReady ? g_hurstZoneMargin : GetOrganicDecayPow(HURST_DEFAULT, 2.0) * 0.2;
-        double H_TRENDING_HIGH = center_H + margin_H;
-        double H_TRENDING_LOW = center_H + margin_H * 0.5;
-        double H_REVERTING_HIGH = center_H - margin_H * 0.5;
-        double H_REVERTING_LOW = center_H - margin_H;
-        
-        string centerMethod;
-        if (g_hurstGlobal >= H_TRENDING_HIGH) centerMethod = "EMA";
-        else if (g_hurstGlobal >= H_TRENDING_LOW) centerMethod = "EMA+MED";
-        else if (g_hurstGlobal >= H_REVERTING_HIGH) centerMethod = "MEDIAN";
-        else if (g_hurstGlobal >= H_REVERTING_LOW) centerMethod = "MED+TRIM";
-        else centerMethod = "TRIMMED";
-        
-        PrintFormat("[EMPIRICAL] RSI center=%.1f (%s) scale=%.1f | H=%.3f | ADX p25=%.1f p75=%.1f | OBV scale=%.1f",
-            data.rsi_center, centerMethod, data.rsi_scale, g_hurstGlobal, data.adx_p25, data.adx_p75, data.obv_scale);
+        PrintFormat("[EMPIRICAL] ? RSI center=%.1f scale=%.1f | ADX p25=%.1f p75=%.1f | OBV scale=%.1f",
+            data.rsi_center, data.rsi_scale, data.adx_p25, data.adx_p75, data.obv_scale);
     }
     
     return true;  // Calcolo completato con successo
 }
 
 //+------------------------------------------------------------------+
-//| 🔬 CALCOLA PERIODI 100% DATA-DRIVEN                              |
-//| TUTTO derivato dal periodo naturale usando SCALE 2^H              |
-//| NESSUNA costante a priori - tutto dall'Hurst exponent            |
-//| scale = 2^H, decay = 2^(-H) - derivati dal regime di mercato     |
+//| ?? CALCOLA PERIODI 100% DATA-DRIVEN                              |
+//| TUTTO derivato dal periodo naturale usando SOLO rapporti f       |
+//| NESSUN numero Fibonacci arbitrario - solo rapporti aurei         |
+//| f � 1.618, 1/f � 0.618, 1/f� � 0.382, 1/f� � 0.236              |
 //| PESO TF: derivato dall'ESPONENTE DI HURST!                       |
 //+------------------------------------------------------------------+
 void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic, int naturalPeriod, double weight, double hurstExp)
 {
-    // 🔬 PESO E HURST passati dal chiamante (derivati empiricamente)
+    // ?? PESO E HURST passati dal chiamante (derivati empiricamente)
     organic.weight = weight;
     organic.hurstExponent = hurstExp;
     
     // ---------------------------------------------------------------
-    // 🔬 SCALE DINAMICHE DERIVATE DA HURST
-    // scale = 2^H    (fattore di espansione)
-    // decay = 2^(-H) (fattore di contrazione)
-    //
-    // Per H=0.5 (random): scale=√2≈1.414, decay≈0.707
-    // Per H=0.7 (trend):  scale≈1.625, decay≈0.616
-    // Per H=0.3 (MR):     scale≈1.231, decay≈0.812
-    // ---------------------------------------------------------------
-    double H = (hurstExp > 0) ? hurstExp : g_hurstGlobal;
-    double scale = GetOrganicScale(H);
-    double decay = GetOrganicDecay(H);
-    double scale2 = GetOrganicScalePow(H, 2.0);  // scale² = 2^(2H)
-    double scale3 = GetOrganicScalePow(H, 3.0);  // scale³ = 2^(3H)
-    double decay2 = GetOrganicDecayPow(H, 2.0);  // decay² = 2^(-2H)
-    double decay3 = GetOrganicDecayPow(H, 3.0);  // decay³ = 2^(-3H)
-    double decay4 = GetOrganicDecayPow(H, 4.0);  // decay⁴ = 2^(-4H)
-    
-    // Salva scale nel struct per uso successivo
-    organic.scale = scale;
-    organic.decay = decay;
-    
-    // ---------------------------------------------------------------
-    // 🔬 PERIODO NATURALE = deriva dall'AUTOCORRELAZIONE (dai DATI!)
-    // Tutti gli altri periodi sono DERIVATI da questo usando scale 2^H
+    // ?? PERIODO NATURALE = deriva dall'AUTOCORRELAZIONE (dai DATI!)
+    // Tutti gli altri periodi sono DERIVATI da questo usando rapporti f
     // Nessun numero arbitrario - la base viene dal mercato stesso
     // ---------------------------------------------------------------
     double base = (double)naturalPeriod;
     
     // ---------------------------------------------------------------
-    // 🔬 PERIODI DERIVATI DA SCALE 2^H
-    // Ogni indicatore usa un multiplo/divisore scale del periodo naturale
-    // Questo crea una scala ADATTIVA che dipende dal regime di mercato
+    // ?? RAPPORTI AUREI per differenziare i periodi
+    // Ogni indicatore usa un multiplo/divisore f del periodo naturale
+    // Questo crea una "scala aurea" di periodi tutti correlati
     //
-    // Molto veloce = base × decay² = base × 2^(-2H)
-    // Veloce       = base × decay  = base × 2^(-H)
-    // Medio        = base × 1       (periodo naturale)
-    // Lento        = base × scale  = base × 2^H
-    // Molto lento  = base × scale² = base × 2^(2H)
-    // Lunghissimo  = base × scale³ = base × 2^(3H)
+    // Molto veloce = base / f� � base � 0.382
+    // Veloce       = base / f  � base � 0.618
+    // Medio        = base � 1   (periodo naturale)
+    // Lento        = base � f  � base � 1.618
+    // Molto lento  = base � f� � base � 2.618
+    // Lunghissimo  = base � f� � base � 4.236
     // ---------------------------------------------------------------
     
-    // Periodi organici - TUTTI derivati dal periodo naturale e H
-    // I minimi (2, 3, 4, 8, 16) sono requisiti TECNICI degli indicatori, non arbitrari:
-    // - EMA/RSI: minimo 2-3 periodi per convergere
-    // - MACD/Stoch: minimo 4 periodi per segnali stabili
-    // - Trend indicators: minimo 8-16 per filtrare rumore
-    int veryFast = (int)MathMax(2, MathRound(base * decay2));         // min=2, base × decay²
-    int fast     = (int)MathMax(3, MathRound(base * decay));          // min=3, base × decay
-    int medium   = (int)MathMax(3, MathRound(base));                  // min=3, base (naturale)
-    int slow     = (int)MathMax(4, MathRound(base * scale));          // min=4, base × scale
-    int verySlow = (int)MathMax(8, MathRound(base * scale2));         // min=8, base × scale²
-    int longest  = (int)MathMax(16, MathRound(base * scale3));        // min=16, base × scale³
+    // Periodi organici - TUTTI derivati dal periodo naturale
+    // ?? I minimi usano potenze di f per coerenza (non Fibonacci arbitrari!)
+    // min_veryFast = f� � 2, min_fast = f� � 3, min_slow = f� � 4, etc.
+    int veryFast = (int)MathMax((int)MathRound(PHI), MathRound(base * PHI_INV_SQ));         // min�2, base � 0.382
+    int fast     = (int)MathMax((int)MathRound(PHI_SQ), MathRound(base * PHI_INV));         // min�3, base � 0.618
+    int medium   = (int)MathMax((int)MathRound(PHI_SQ), MathRound(base));                   // min�3, base (naturale)
+    int slow     = (int)MathMax((int)MathRound(PHI_SQ * PHI), MathRound(base * PHI));       // min�4, base � 1.618
+    int verySlow = (int)MathMax((int)MathRound(PHI_SQ * PHI_SQ), MathRound(base * PHI_SQ)); // min�7, base � 2.618
+    int longest  = (int)MathMax((int)MathRound(PHI_SQ * PHI_SQ * PHI), MathRound(base * PHI_SQ * PHI)); // min�11, base � 4.236
     
     if (g_enableLogsEffective) {
-        PrintFormat("[ORGANIC] 🔬 TF %s: H=%.3f scale=%.3f decay=%.3f | Natural=%d → VeryFast=%d Fast=%d Medium=%d Slow=%d VerySlow=%d Longest=%d",
-            EnumToString(tf), H, scale, decay, naturalPeriod, veryFast, fast, medium, slow, verySlow, longest);
+        PrintFormat("[ORGANIC] ?? TF %s: Naturale=%d ? VeryFast=%d Fast=%d Medium=%d Slow=%d VerySlow=%d Longest=%d",
+            EnumToString(tf), naturalPeriod, veryFast, fast, medium, slow, verySlow, longest);
     }
     
     // ---------------------------------------------------------------
-    // 🔬 ASSEGNAZIONE PERIODI - Logica basata sul ruolo dell'indicatore
-    // Indicatori "veloci" → usano periodi corti (momentum, segnali)
-    // Indicatori "lenti" → usano periodi lunghi (trend, struttura)
+    // ?? ASSEGNAZIONE PERIODI - Logica basata sul ruolo dell'indicatore
+    // Indicatori "veloci" ? usano periodi corti (momentum, segnali)
+    // Indicatori "lenti" ? usano periodi lunghi (trend, struttura)
     // ---------------------------------------------------------------
     
-    // Trend indicators (necessitano periodi più lunghi)
-    organic.ema = slow;                     // EMA: segue il trend → slow
+    // Trend indicators (necessitano periodi pi� lunghi)
+    organic.ema = slow;                     // EMA: segue il trend ? slow
     
     // Momentum indicators
-    organic.rsi = medium;                   // RSI → medium
+    organic.rsi = medium;                   // RSI ? medium
     
-    // MACD (tre periodi in relazione scale tra loro)
-    organic.macd_fast = fast;               // MACD veloce → fast
-    organic.macd_slow = slow;               // MACD lento → slow
-    organic.macd_signal = veryFast;         // MACD signal → veryFast (smoothing)
+    // MACD (tre periodi in relazione aurea tra loro)
+    organic.macd_fast = fast;               // MACD veloce ? fast
+    organic.macd_slow = slow;               // MACD lento ? slow
+    organic.macd_signal = veryFast;         // MACD signal ? veryFast (smoothing)
     
     // Bollinger Bands
-    organic.bb = slow;                      // BB periodo → slow
-    // BB deviation: decay + √base × decay² (data-driven)
-    organic.bb_dev = decay + MathSqrt(base) * decay2;
-    // Limiti: min=decay (≈0.6-0.8), max=scale² (≈2-3)
-    organic.bb_dev = MathMax(decay, MathMin(scale2, organic.bb_dev));
+    organic.bb = slow;                      // BB periodo ? slow
+    organic.bb_dev = PHI_INV + MathSqrt(base) * PHI_INV_SQ;  // BB dev: organico da base
+    // ?? Limiti derivati da f: min=1/f�0.618 (banda stretta), max=f�1.618 + 1 = 2.618
+    organic.bb_dev = MathMax(PHI_INV, MathMin(PHI_SQ, organic.bb_dev));
     
     // Volatility indicators
-    organic.atr = medium;                   // ATR: volatilità → medium
-    organic.adx = medium;                   // ADX: forza trend → medium
+    organic.atr = medium;                   // ATR: volatilit� ? medium
+    organic.adx = medium;                   // ADX: forza trend ? medium
     
     // ---------------------------------------------------------------
-    // 🔬 INDICATORI TREND (derivati da scale 2^H)
+    // ?? NUOVI INDICATORI TREND (da v1.0)
+    // Tutti derivati dal periodo naturale usando rapporti f
     // ---------------------------------------------------------------
     
-    // Parabolic SAR (parametri step/max derivati da H)
-    organic.psar_step = decay4;             // decay⁴ ≈ 0.05-0.25 (step dinamico)
-    organic.psar_max = decay;               // decay ≈ 0.6-0.8 (max dinamico)
+    // Parabolic SAR (parametri step/max derivati da f)
+    organic.psar_step = MathPow(PHI_INV, 4);   // f?4 � 0.146 (step organico)
+    organic.psar_max = PHI_INV;                 // f?� � 0.618 (max organico)
     
-    // SMA Cross (due medie in rapporto scale² tra loro)
-    organic.sma_fast = slow;                // SMA veloce = base × scale
-    organic.sma_slow = longest;             // SMA lenta = base × scale³
+    // SMA Cross (due medie in rapporto f� tra loro)
+    organic.sma_fast = slow;                    // SMA veloce = naturalPeriod � f
+    organic.sma_slow = longest;                 // SMA lenta = naturalPeriod � f�
     
-    // Ichimoku (tre linee in rapporto scale tra loro)
-    organic.ichimoku_tenkan = medium;       // Tenkan = base (conversione veloce)
-    organic.ichimoku_kijun = slow;          // Kijun = base × scale (linea base)
-    organic.ichimoku_senkou = verySlow;     // Senkou B = base × scale² (cloud trailing)
-    
-    // ---------------------------------------------------------------
-    // 🔬 STOCHASTIC (indicatore mean-reversion, vota inversione)
-    // Periodi derivati da scale, usato per rilevare zone ipercomprato/ipervenduto
-    // ---------------------------------------------------------------
-    organic.stoch_k = medium;               // %K = periodo naturale
-    organic.stoch_d = fast;                 // %D = periodo × decay (più veloce)
-    organic.stoch_slowing = (int)MathMax(2, MathRound(scale));  // Slowing ≈ 2-3
+    // Ichimoku (tre linee in rapporto f tra loro)
+    organic.ichimoku_tenkan = medium;           // Tenkan = base (conversione veloce)
+    organic.ichimoku_kijun = slow;              // Kijun = base × φ (linea base)
+    organic.ichimoku_senkou = verySlow;         // Senkou B = base × φ² (cloud trailing)
     
     // ---------------------------------------------------------------
-    // 🔬 PESO TF = H_TF / Σ(H_tutti_TF)
-    // TF con Hurst maggiore → peso maggiore
-    // peso già calcolato in OnInit e assegnato a organic.weight
+    // 🌱 STOCHASTIC (indicatore mean-reversion, vota inversione)
+    // Periodi derivati da φ, usato per rilevare zone ipercomprato/ipervenduto
     // ---------------------------------------------------------------
-    // organic.weight già assegnato all'inizio della funzione
-    // organic.hurstExponent già assegnato all'inizio della funzione
+    organic.stoch_k = medium;                   // %K = periodo naturale
+    organic.stoch_d = fast;                     // %D = periodo × φ⁻¹ (più veloce)
+    organic.stoch_slowing = (int)MathMax(2, MathRound(PHI_SQ));  // Slowing = φ² ≈ 3
     
-    // 🔬 Barre minime = periodo più lungo usato × scale + margin
+    // ---------------------------------------------------------------
+    // ?? PESO TF = H_TF / S(H_tutti_TF)
+    // TF con Hurst maggiore ? peso maggiore
+    // peso gi� calcolato in OnInit e assegnato a organic.weight
+    // ---------------------------------------------------------------
+    // organic.weight gi� assegnato all'inizio della funzione
+    // organic.hurstExponent gi� assegnato all'inizio della funzione
+    
+    // ?? Barre minime = periodo pi� lungo usato + margine
     // Calcolato dinamicamente in base ai periodi effettivi
-    organic.min_bars_required = (int)MathRound(longest * scale) + medium;
+    // Per Ichimoku: Senkou B ha displacement di 26 periodi standard,
+    // usiamo longest � f per avere margine sufficiente
+    organic.min_bars_required = (int)MathRound(longest * PHI) + medium;
     
-    // 🔬 Salva il periodo naturale per uso nelle scale
+    // ?? Salva il periodo naturale per uso nelle scale
     organic.naturalPeriod = naturalPeriod;
 }
 
 //+------------------------------------------------------------------+
-//| 🔬 Log dei periodi organici calcolati                            |
+//| ?? Log dei periodi organici calcolati                            |
 //+------------------------------------------------------------------+
 void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 {
-    PrintFormat("[%s] 🔬 H=%.3f scale=%.3f decay=%.3f | Peso TF: %.2f",
-        tfName, organic.hurstExponent, organic.scale, organic.decay, organic.weight);
-    PrintFormat("[%s] 🔬 Periodi: EMA=%d RSI=%d MACD=%d/%d/%d BB=%d(%.2f) ATR=%d ADX=%d",
-        tfName, organic.ema, organic.rsi, 
+    PrintFormat("[%s] ?? Peso TF: %.2f | EMA=%d RSI=%d MACD=%d/%d/%d BB=%d(%.1f) ATR=%d ADX=%d",
+        tfName, organic.weight, organic.ema, organic.rsi, 
         organic.macd_fast, organic.macd_slow, organic.macd_signal,
         organic.bb, organic.bb_dev, organic.atr, organic.adx);
-    PrintFormat("[%s] 🔬 TREND: PSAR=%.4f/%.3f SMA=%d/%d Ichimoku=%d/%d/%d | Stoch=%d/%d/%d | Min barre: %d",
+    PrintFormat("[%s] ?? TREND: PSAR=%.3f/%.2f SMA=%d/%d Ichimoku=%d/%d/%d | Stoch=%d/%d/%d | Min barre: %d",
         tfName, organic.psar_step, organic.psar_max,
         organic.sma_fast, organic.sma_slow,
         organic.ichimoku_tenkan, organic.ichimoku_kijun, organic.ichimoku_senkou,
@@ -4159,17 +3761,17 @@ void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 }
 
 //+------------------------------------------------------------------+
-//| 🔬 FIX: Verifica se i periodi sono cambiati significativamente    |
-//| Ritorna true se almeno un periodo è cambiato >25% (soglia fissa)  |
+//| ?? FIX: Verifica se i periodi sono cambiati significativamente    |
+//| Ritorna true se almeno un periodo � cambiato >23.6% (soglia = 1/f�)|
 //| In tal caso gli handle indicatori devono essere ricreati          |
 //+------------------------------------------------------------------+
 bool PeriodsChangedSignificantly()
 {
     if (!g_periodsInitialized) return false;  // Primo calcolo, non serve confronto
     
-    // 🔬 Soglia cambio = 25% (valore empirico ragionevole)
+    // ?? Soglia cambio = 1/f� � 23.6% (derivata organicamente da f)
     //    Abbastanza reattiva ma non troppo sensibile
-    const double CHANGE_THRESHOLD = 0.25;  // 25%
+    const double CHANGE_THRESHOLD = PHI_INV_CUB;  // � 0.236 = 23.6%
     
     // Controlla ogni TF attivo
     if (g_dataReady_M5) {
@@ -4983,12 +4585,12 @@ bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
         return false;
     }
     
-    // FIX: Non piu warning "dati parziali" - ora usiamo quello che c'e
+    // ?? FIX: Non pi� warning "dati parziali" - ora usiamo quello che c'�
     // Se servono N barre e ne abbiamo M < N, usiamo M (il sistema si adatta)
     
-    // FIX: Verifica che i dati non siano corrotti (prezzi validi)
-    // Numero barre da verificare = DEFAULT_PERIOD_M5 / 3
-    int barsToCheck = MathMax(4, DEFAULT_PERIOD_M5 / 3);
+    // ?? FIX: Verifica che i dati non siano corrotti (prezzi validi)
+    // ?? Numero barre da verificare = round(f�) � 4 (derivato da f)
+    int barsToCheck = (int)MathRound(MathPow(PHI, 3));  // f� � 4
     int invalidBars = 0;
     for (int i = 0; i < MathMin(copiedBars, barsToCheck); i++) {
         if (data.rates[i].close <= 0 || data.rates[i].open <= 0 ||
@@ -4997,8 +4599,8 @@ bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
             invalidBars++;
         }
     }
-    // Soglia = metà delle barre verificate massime
-    int maxInvalidBars = barsToCheck / 2;
+    // ?? Soglia = round(f) � 2 (derivato da f)
+    int maxInvalidBars = (int)MathRound(PHI);  // � 2
     if (invalidBars > maxInvalidBars) {
         PrintFormat("[ERROR] TF %s: Dati corrotti rilevati (%d/%d barre invalide)", 
             EnumToString(tf), invalidBars, barsToCheck);
@@ -5142,10 +4744,10 @@ bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
 }
 
 //+------------------------------------------------------------------+
-//| Calcolo valori organici per ATR e ADX - PURO                     |
+//| ?? Calcolo valori organici per ATR e ADX - PURO                  |
 //| FORMULA ATR: atr_avg = media(ATR ultime N barre)                 |
-//| FORMULA ADX: adx_threshold = media(ADX) + decay(H) * stddev(ADX) |
-//| Se dati insufficienti -> isDataReady = false (no fallback!)      |
+//| FORMULA ADX: adx_threshold = media(ADX) + (1/f) * stddev(ADX)   |
+//| Se dati insufficienti ? isDataReady = false (no fallback!)       |
 //+------------------------------------------------------------------+
 void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
 {
@@ -5159,13 +4761,13 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     int lastIdx = count - 1;
     
     // ---------------------------------------------------------------
-    // LOOKBACK derivato dal naturalPeriod * scale(H)
-    // Solo UN moltiplicatore basato su H, non potenze arbitrarie!
-    // Il naturalPeriod gia deriva dai DATI (autocorrelazione)
+    // ?? LOOKBACK derivato dal naturalPeriod � f
+    // Solo UN moltiplicatore f, non potenze arbitrarie!
+    // Il naturalPeriod gi� deriva dai DATI (autocorrelazione)
     // ---------------------------------------------------------------
-    int organicLookback = (int)MathRound(data.organic.naturalPeriod * GetOrganicScale(g_hurstGlobal));
+    int organicLookback = (int)MathRound(data.organic.naturalPeriod * PHI);
     int lookback = MathMin(organicLookback, count - 1);
-    lookback = MathMax(lookback, 3);  // Minimo 3 barre
+    lookback = MathMax(lookback, (int)MathRound(PHI_SQ));  // Minimo f� � 3
     
     // ---------------------------------------------------------------
     // ATR ORGANICO: Media semplice delle ultime N barre
@@ -5188,9 +4790,9 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     data.atr_avg = atr_sum / atr_count;
     
     // ---------------------------------------------------------------
-    // ADX ORGANICO: Media + decay(H) * deviazione standard
-    // Formula: threshold = avg(ADX) + decay(H) * sqrt(sum((ADX-avg)^2)/N)
-    // Questo identifica quando ADX e "significativamente sopra" la norma
+    // ADX ORGANICO: Media + (1/f) * deviazione standard
+    // Formula: threshold = avg(ADX) + (1/f) * sqrt(sum((ADX-avg)^2)/N)
+    // Questo identifica quando ADX � "significativamente sopra" la norma
     // ---------------------------------------------------------------
     double adx_sum = 0;
     int adx_count = 0;
@@ -5232,24 +4834,24 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     bool empiricalOK = CalculateEmpiricalThresholds(data, lookback);
     
     if (!empiricalOK) {
-        Print("[ORGANIC] Calcolo soglie empiriche FALLITO - TF DISABILITATO");
+        Print("? [ORGANIC] Calcolo soglie empiriche FALLITO - TF DISABILITATO");
         data.isDataReady = false;
         return;
     }
     
-    // Soglia ADX organica = media + decay(H) * stddev ~ avg + 0.6*stddev
-    // decay(H) = 2^(-H) definisce la proporzione tra media e variazione
-    data.adx_threshold = data.adx_avg + GetOrganicDecay(g_hurstGlobal) * data.adx_stddev;
+    // ?? Soglia ADX organica = media + (1/f) � stddev � avg + 0.618�stddev
+    // f (rapporto aureo) definisce la proporzione naturale tra media e variazione
+    data.adx_threshold = data.adx_avg + PHI_INV * data.adx_stddev;
     
-    // Limita la soglia usando PERCENTILI empirici invece di potenze arbitrarie
+    // ?? Limita la soglia usando PERCENTILI empirici invece di potenze arbitrarie
     // I limiti ora derivano dalla distribuzione REALE dei dati ADX
     data.adx_threshold = MathMax(data.adx_p25, MathMin(data.adx_p75, data.adx_threshold));
     
-    // Tutti i calcoli completati con successo
+    // ? Tutti i calcoli completati con successo
     data.isDataReady = true;
     
     if (g_enableLogsEffective) {
-        PrintFormat("[ORGANIC] TF ready: ATR_avg=%.5f ADX_threshold=%.1f lookback=%d",
+        PrintFormat("[ORGANIC] ? TF ready: ATR_avg=%.5f ADX_threshold=%.1f lookback=%d",
             data.atr_avg, data.adx_threshold, lookback);
     }
 }
@@ -5305,35 +4907,34 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
     }
     
     double price = data.rates[lastIdx].close;
-    // USA g_pointValue CACHATO (inizializzato in OnInit)
+    // ?? USA g_pointValue CACHATO (inizializzato 1� in OnInit)
     double point_value = g_pointValue;
     
-    // SCALA ORGANICA: usa ATR medio * scale(H) come unita di volatilita
-    // scale(H) = 2^H ~ 1.4-1.6 per H tipico 0.5-0.7
-    // Distanza = scale(H) * ATR per raggiungere normalizzazione +/-1
-    // Minimo organico = naturalPeriod * scale(H) pips (derivato dai DATI)
-    double scale = GetOrganicScale(g_hurstGlobal);
-    double min_organic_scale = point_value * data.organic.naturalPeriod * scale;
+    // ?? SCALA ORGANICA: usa ATR medio � f (rapporto aureo) come unit� di volatilit�
+    // f � 1.618 � la proporzione naturale universale
+    // Distanza = f � ATR per raggiungere normalizzazione �1
+    // Minimo organico = naturalPeriod � f pips (derivato dai DATI)
+    double min_organic_scale = point_value * data.organic.naturalPeriod * PHI;
     
-    // FIX: Protezione divisione per zero con fallback multipli
-    double atr_scale = data.atr_avg * scale;  // Scala primaria
+    // ?? FIX: Protezione divisione per zero con fallback multipli
+    double atr_scale = data.atr_avg * PHI;  // Scala primaria
     
     // Fallback 1: usa min_organic_scale se ATR troppo basso
     if (atr_scale < min_organic_scale || atr_scale <= 0) {
         atr_scale = min_organic_scale;
     }
     
-    // Fallback 2: se ancora zero, usa point_value * scale
+    // Fallback 2: se ancora zero, usa point_value * PHI
     if (atr_scale <= 0) {
-        atr_scale = point_value * scale;
+        atr_scale = point_value * PHI;
     }
     
-    // Fallback 3: minimo assoluto = 0.00001 (5 decimali forex)
+    // Fallback 3: minimo assoluto organico = PHI^-23 (circa 0.00001)
     if (atr_scale <= 0) {
-        atr_scale = 0.00001;
+        atr_scale = MathPow(PHI_INV, 23);  // � 0.0000106
     }
     
-    // VALIDATO: atr_scale sempre > 0 dopo tutti i fallback
+    // ✅ VALIDATO: atr_scale sempre > 0 dopo tutti i fallback
     
     // ═══════════════════════════════════════════════════════════════
     // CALCOLO VALORI NORMALIZZATI (>0 = BUY, <0 = SELL)
@@ -5341,15 +4942,15 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
     
     double totalScore = 0;
     
-    // Peso organico del TF (calcolato da Hurst: peso = H_TF / Sum(H_tutti_TF))
+    // 🌱 Peso organico del TF (calcolato da Hurst: peso = H_TF / Σ(H_tutti_TF))
     double w = data.organic.weight;
     
-    // 🌱 PESI RELATIVI PER CATEGORIA (Hurst-derivati)
+    // 🌱 PESI RELATIVI PER CATEGORIA (φ-derivati)
     // TREND PRIMARIO: peso base = 1.0 (riferimento)
-    // TREND SUPPORT:  peso = decay(H) (conferma, non guida)
+    // TREND SUPPORT:  peso = φ⁻¹ ≈ 0.618 (conferma, non guida)
     // TREND FILTER:   peso = 1.0 ma condizionale (solo se ADX > soglia)
     double w_primary = w * 1.0;       // EMA, MACD, PSAR, SMA, Ichimoku
-    double w_support = w * GetOrganicDecay(g_hurstGlobal);   // BB, Heikin
+    double w_support = w * PHI_INV;   // BB, Heikin (≈ 62% del primario)
     double w_filter = w * 1.0;        // ADX (condizionale)
     
     // ═══════════════════════════════════════════════════════════════
@@ -5429,29 +5030,23 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
             cloud_signal = MathMax(-1.0, (price - cloud_bottom) / atr_scale);
         } else {
             // Dentro la cloud = segnale debole proporzionale
-            double decay = GetOrganicDecay(g_hurstGlobal);
-            double cloud_width = cloud_top - cloud_bottom;
-            double denominator = (cloud_width / 2.0) + (atr_scale * decay);
-            // Protezione divisione per zero
-            if (denominator < atr_scale * 0.01) denominator = atr_scale * 0.01;
-            cloud_signal = (price - cloud_mid) / denominator;
-            // 🌱 FIX: Clamp data-driven invece di ±0.5 arbitrario
-            cloud_signal = MathMax(-decay, MathMin(decay, cloud_signal));  // Dentro cloud = max ±decay
+            cloud_signal = (price - cloud_mid) / ((cloud_top - cloud_bottom) / 2.0 + atr_scale * PHI_INV);
+            // 🌱 FIX: Clamp φ-derivato invece di ±0.5 arbitrario
+            cloud_signal = MathMax(-PHI_INV, MathMin(PHI_INV, cloud_signal));  // Dentro cloud = max ±φ⁻¹ ≈ ±0.618
         }
         
-        // 🌱 Combina i segnali con pesi: scale(H) per TK cross, 1 per cloud
-        double scale = GetOrganicScale(g_hurstGlobal);
-        double ichi_score = (tk_signal * scale + cloud_signal) / (scale + 1.0);
-        totalScore += ichi_score * w_primary;  // 🌱 TREND PRIMARY
+        // ?? Combina i segnali con pesi organici: f per TK cross, 1 per cloud
+        double ichi_score = (tk_signal * PHI + cloud_signal) / (PHI + 1.0);
+        totalScore += ichi_score * w_primary;  // ?? TREND PRIMARY
     }
     
     // Bollinger Bands: posizione relativa nel range
-    // 🌱 FIX: Protezione divisione per zero con minimo data-driven
+    // ?? FIX: Protezione divisione per zero con minimo organico
     if (enableBB && ArraySize(data.bb_upper) > lastIdx && ArraySize(data.bb_lower) > lastIdx && ArraySize(data.bb_middle) > lastIdx) {
         double bb_range = data.bb_upper[lastIdx] - data.bb_lower[lastIdx];
-        // 🌱 FIX: Minimo BB range = ATR * decay^2 (evita divisione per valori troppo piccoli)
-        double min_bb_range = atr_scale * GetOrganicDecayPow(g_hurstGlobal, 2);
-        if (min_bb_range <= 0) min_bb_range = point_value * 2.0;  // Fallback assoluto
+        // ?? FIX: Minimo BB range = ATR � f?� (evita divisione per valori troppo piccoli)
+        double min_bb_range = atr_scale * PHI_INV_SQ;
+        if (min_bb_range <= 0) min_bb_range = point_value * PHI;  // Fallback assoluto
         
         double bb_norm = 0;
         if (bb_range > min_bb_range) {
@@ -5459,23 +5054,23 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
             bb_norm = MathMax(-1.0, MathMin(1.0, bb_norm));
         }
         // Se bb_range <= min_bb_range, bande troppo strette, segnale neutro (0)
-        totalScore += bb_norm * w_support;  // 🌱 TREND SUPPORT
+        totalScore += bb_norm * w_support;  // ?? TREND SUPPORT (≈62% del primario)
     }
     
-    // ATR: indicatore di volatilità (non direzionale) - escluso dal voto direzionale
+    // ATR: indicatore di volatilit� (non direzionale) - escluso dal voto direzionale
     // ADX: forza del trend (non direzionale) - escluso dal voto direzionale
     // Entrambi possono essere usati esternamente come filtri ma non contribuiscono allo score
     
     // ---------------------------------------------------------------
-    // 🌱 INDICATORI ADDIZIONALI
+    // ?? INDICATORI ADDIZIONALI
     // ---------------------------------------------------------------
     
-    // 🌱 Heikin Ashi: close - open
-    // 🌱 Scala ORGANICA: usa decay(H) dell'ATR (corpo HA = proporzione Hurst del range)
+    // ?? Heikin Ashi: close - open
+    // ?? Scala ORGANICA: usa 1/f dell'ATR (corpo HA = proporzione aurea del range)
     if (enableHeikin && ArraySize(data.ha_close) > lastIdx && ArraySize(data.ha_open) > lastIdx) {
         double ha_diff = data.ha_close[lastIdx] - data.ha_open[lastIdx];
-        double ha_norm = MathMax(-1.0, MathMin(1.0, ha_diff / (atr_scale * GetOrganicDecay(g_hurstGlobal))));
-        totalScore += ha_norm * w_support;  // 🌱 TREND SUPPORT
+        double ha_norm = MathMax(-1.0, MathMin(1.0, ha_diff / (atr_scale * PHI_INV)));  // 1/φ ≈ 0.618
+        totalScore += ha_norm * w_support;  // ?? TREND SUPPORT (≈62% del primario)
     }
     
     // 🌱 v1.1: OBV è MEAN-REVERSION - vota nella sezione combinata (non qui)
@@ -5483,38 +5078,36 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
     // dove è combinato con RSI e Stochastic per votare direzione inversione
     
     // ═══════════════════════════════════════════════════════════════
-    // 🌱 ADX: TREND-FOLLOWING 100% DATA-DRIVEN (basato su 2^H)
-    // Soglia: avg + decay(H) × stddev
-    // Max forte: avg + scale^2 × stddev
-    // DI norm: basato su stddev × scale
+    // 🌱 ADX: TREND-FOLLOWING 100% ORGANICO (basato su φ)
+    // Soglia: avg + (1/φ) × stddev ≈ avg + 0.618×stddev
+    // Max forte: avg + f� � stddev � avg + 2.618�stddev
+    // DI norm: basato su stddev � f
     // ---------------------------------------------------------------
     if (enableADX && ArraySize(data.adx) > lastIdx && ArraySize(data.di_plus) > lastIdx && ArraySize(data.di_minus) > lastIdx) {
         double adx_val = data.adx[lastIdx];
         double di_plus = data.di_plus[lastIdx];
         double di_minus = data.di_minus[lastIdx];
         
-        // 🌱 Valori data-driven derivati da 2^H e statistiche del mercato
-        double scale = GetOrganicScale(g_hurstGlobal);
-        double scaleSq = GetOrganicScalePow(g_hurstGlobal, 2);
-        double adx_threshold_organic = data.adx_threshold;                         // avg + decay*stddev
-        double adx_max_organic = data.adx_avg + scaleSq * data.adx_stddev;         // scale^2 sigma = molto forte
-        double di_scale_organic = MathMax(scaleSq, data.adx_stddev * scale);       // min scale^2
+        // ?? Valori organici derivati da f e statistiche del mercato
+        double adx_threshold_organic = data.adx_threshold;                         // avg + PHI_INV�stddev
+        double adx_max_organic = data.adx_avg + PHI_SQ * data.adx_stddev;          // f� sigma = molto forte
+        double di_scale_organic = MathMax(PHI_SQ, data.adx_stddev * PHI);          // min f� � 2.618
         
-        // Solo se ADX supera la soglia data-driven (trend significativo per questo mercato)
+        // Solo se ADX supera la soglia organica (trend significativo per questo mercato)
         if (adx_val > adx_threshold_organic && adx_max_organic > adx_threshold_organic) {
-            // 🌱 Forza normalizzata: (ADX - soglia) / (max - soglia)
+            // ?? Forza normalizzata: (ADX - soglia) / (max - soglia), dove max = avg + f��stddev
             double adx_strength = MathMin(1.0, (adx_val - adx_threshold_organic) / (adx_max_organic - adx_threshold_organic));
             
-            // 🌱 Direzione basata su +DI vs -DI, normalizzata con scale
+            // ?? Direzione basata su +DI vs -DI, normalizzata con f
             double di_diff = di_plus - di_minus;
             double di_norm = MathMax(-1.0, MathMin(1.0, di_diff / di_scale_organic));
             
             // Score = direzione * forza del trend * peso
-            totalScore += di_norm * adx_strength * w_filter;  // 🌱 TREND FILTER (condizionale)
+            totalScore += di_norm * adx_strength * w_filter;  // ?? TREND FILTER (condizionale)
             
-            // 🌱 Log ADX (se abilitato)
+            // ?? Log organico ADX (se abilitato)
             if (g_enableLogsEffective) {
-                PrintFormat("[%s] 🌱 ADX DATA-DRIVEN: val=%.1f > soglia=%.1f (max=%.1f) → DI+:%.1f DI-:%.1f scale=%.1f",
+                PrintFormat("[%s] ?? ADX ORGANICO: val=%.1f > soglia=%.1f (maxf�s=%.1f) ? DI+:%.1f DI-:%.1f scale=%.1f",
                     timeframe, adx_val, adx_threshold_organic, adx_max_organic, di_plus, di_minus, di_scale_organic);
             }
         }
@@ -5543,37 +5136,32 @@ void OnTick()
     // Qui controlliamo solo che i flag siano pronti, non aspettiamo tempo reale
     // ---------------------------------------------------------------
     if (!g_warmupComplete) {
-        // FIX: Se Hurst filter e disabilitato, skip check buffer Hurst
+        // ?? FIX: Se Hurst filter � disabilitato, skip check buffer Hurst
         bool hurstBufferReady = true;
         bool tradeScoreBufferReady = true;
         bool hurstReadyCheck = true;
         
-        // Soglia minima = decay^2 del buffer massimo (~25% per H=0.5)
-        double minBufferFraction = GetOrganicDecayPow(g_hurstGlobal > 0 ? g_hurstGlobal : HURST_DEFAULT, 2.0);
-        int hurstMinRequired = (int)MathCeil(HURST_HISTORY_MAX * minBufferFraction);
-        int scoreMinRequired = (int)MathCeil(TRADE_SCORE_HISTORY_MAX * minBufferFraction);
-        
         if (EnableHurstFilter) {
-            hurstBufferReady = (g_hurstHistorySize >= hurstMinRequired);
-            tradeScoreBufferReady = (g_tradeScoreHistorySize >= scoreMinRequired);
+            hurstBufferReady = (g_hurstHistorySize >= (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ));
+            tradeScoreBufferReady = (g_tradeScoreHistorySize >= (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ));
             hurstReadyCheck = g_hurstReady;
         }
         
         if (hurstBufferReady && tradeScoreBufferReady && hurstReadyCheck) {
             g_warmupComplete = true;
             if (EnableHurstFilter) {
-                Print("[WARMUP] Buffer pre-caricati dallo storico - EA pronto per il trading");
+                Print("? [WARMUP] Buffer pre-caricati dallo storico - EA pronto per il trading");
             } else {
-                Print("[WARMUP] Hurst filter DISABILITATO - EA pronto per il trading (no buffer richiesti)");
+                Print("? [WARMUP] Hurst filter DISABILITATO - EA pronto per il trading (no buffer richiesti)");
             }
         } else {
             // Preload fallito - tenta ricalcolo incrementale
             static datetime lastWarmupLog = 0;
             if (TimeCurrent() - lastWarmupLog >= 30) {
-                PrintFormat("[WARMUP] In attesa dati sufficienti: Hurst=%d/%d TradeScore=%d/%d Ready=%s", 
-                    g_hurstHistorySize, hurstMinRequired,
-                    g_tradeScoreHistorySize, scoreMinRequired,
-                    g_hurstReady ? "Si" : "No");
+                PrintFormat("?? [WARMUP] In attesa dati sufficienti: Hurst=%d/%d TradeScore=%d/%d Ready=%s", 
+                    g_hurstHistorySize, (int)MathCeil(HURST_HISTORY_MAX * PHI_INV_SQ),
+                    g_tradeScoreHistorySize, (int)MathCeil(TRADE_SCORE_HISTORY_MAX * PHI_INV_SQ),
+                    g_hurstReady ? "S�" : "No");
                 lastWarmupLog = TimeCurrent();
             }
             
@@ -5584,7 +5172,7 @@ void OnTick()
                 lastBarTime_warmup = currentBarTime_warmup;
                 RecalculateOrganicSystem();
             }
-            return;  // Non proseguire con trading finche buffer non pronti
+            return;  // Non proseguire con trading finch� buffer non pronti
         }
     }
     
@@ -5632,13 +5220,13 @@ void OnTick()
     }
     
     // Carica dati multi-timeframe per analisi
-    // Sistema robusto: continua con i TF disponibili
-    // OTTIMIZZATO: Ricarica solo ogni N barre
-    if (g_enableLogsEffective) Print("[DATA] Caricamento dati multi-timeframe in corso...");
+    // ?? Sistema robusto: continua con i TF disponibili
+    // ?? OTTIMIZZATO: Ricarica solo ogni N barre
+    if (g_enableLogsEffective) Print("[DATA] ?? Caricamento dati multi-timeframe in corso...");
     
-    // CHECK CACHE DATI TF - Ricarica solo se necessario
-    // Intervallo reload dati = RecalcEveryBars / DEFAULT_PERIOD_M5 / 3
-    int tfDataReloadDivisor = MathMax(2, DEFAULT_PERIOD_M5 / 3);
+    // ?? CHECK CACHE DATI TF - Ricarica solo se necessario
+    // ?? Intervallo reload dati derivato da f� � 4 (invece di 5 hardcoded)
+    int tfDataReloadDivisor = (int)MathRound(MathPow(PHI, 3));  // f� � 4
     int tfDataReloadInterval = MathMax(1, RecalcEveryBars / tfDataReloadDivisor);  // Reload dinamico
     bool shouldReloadTFData = false;
     
@@ -5650,30 +5238,31 @@ void OnTick()
     }
     
     // ---------------------------------------------------------------
-    // barsToLoad = max(min_bars_required di tutti i TF) * scale(H) (buffer statistico)
-    // Usiamo il max tra tutti i periodi organici gia calcolati
+    // ?? barsToLoad = max(min_bars_required di tutti i TF) � f (buffer statistico)
+    // Usiamo il max tra tutti i periodi organici gi� calcolati
     // min_bars_required = longest period + buffer organico (calcolato in CalculateOrganicPeriods)
     // ---------------------------------------------------------------=
     int maxPeriodNeeded = MathMax(g_organic_M5.min_bars_required, 
                           MathMax(g_organic_H1.min_bars_required,
                           MathMax(g_organic_H4.min_bars_required, g_organic_D1.min_bars_required)));
-    // Buffer = periodo max * scale(H) (per avere overlap statistico)
-    int barsToLoad = (int)MathRound(maxPeriodNeeded * GetOrganicScale(g_hurstGlobal));
-    // Minimo = GetBufferXLarge() barre (~48-68)
-    int minBarsOrganic = GetBufferXLarge();
+    // Buffer = periodo max � f (per avere overlap statistico)
+    int barsToLoad = (int)MathRound(maxPeriodNeeded * PHI);
+    // ?? Minimo organico = f8 � 47 (derivato da potenza di f)
+    int minBarsOrganic = (int)MathRound(PHI_SQ * PHI_SQ * PHI_SQ * PHI_SQ);  // f8 � 46.98
     barsToLoad = MathMax(barsToLoad, minBarsOrganic);
-    // FIX: Limite massimo data-driven = periodo H1 × scale⁴(H) ≈ 96-192
-    int maxBarsLimit = GetDataDrivenBufferSize(DEFAULT_PERIOD_H1, g_hurstGlobal, 4);
+    // ?? FIX: Limite massimo ragionevole per evitare richieste assurde
+    // f�� � 322 � un limite sensato per analisi tecnica
+    int maxBarsLimit = (int)MathRound(MathPow(PHI, 12));  // � 322
     if (barsToLoad > maxBarsLimit) {
         static bool warnedOnce = false;
         if (!warnedOnce) {
-            PrintFormat("[DATA] barsToLoad ridotto da %d a %d (limite max)", barsToLoad, maxBarsLimit);
+            PrintFormat("[DATA] ?? barsToLoad ridotto da %d a %d (limite f��)", barsToLoad, maxBarsLimit);
             warnedOnce = true;
         }
         barsToLoad = maxBarsLimit;
     }
     
-    // USA CACHE O RICARICA
+    // ?? USA CACHE O RICARICA
     bool m5Loaded = true, h1Loaded = true, h4Loaded = true, d1Loaded = true;
     
     if (shouldReloadTFData) {
@@ -5744,16 +5333,16 @@ void OnTick()
         return;
     }
     
-    // LOG VALORI ORGANICI CALCOLATI (sempre visibile se abilitato)
+    // ?? LOG VALORI ORGANICI CALCOLATI (sempre visibile se abilitato)
     if (g_enableLogsEffective) {
         static datetime lastOrganicLogTime = 0;
         datetime currentTime = TimeCurrent();
         
-        // Log organico ogni naturalPeriod * scale(H) secondi (derivato dai DATI!)
-        // Usiamo il naturalPeriod di M5 * 60 (secondi per barra) * scale(H)
-        int logIntervalSeconds = (int)MathRound(g_organic_M5.naturalPeriod * 60 * GetOrganicScale(g_hurstGlobal));
-        // Minimo = 16 secondi
-        int minLogInterval = GetBufferMedium();  // 16
+        // ?? Log organico ogni naturalPeriod � f secondi (derivato dai DATI!)
+        // Usiamo il naturalPeriod di M5 � 60 (secondi per barra) � f
+        int logIntervalSeconds = (int)MathRound(g_organic_M5.naturalPeriod * 60 * PHI);
+        // ?? Minimo organico = f5 � 11 secondi
+        int minLogInterval = (int)MathRound(MathPow(PHI, 5));
         logIntervalSeconds = MathMax(minLogInterval, logIntervalSeconds);
         
         if (currentTime - lastOrganicLogTime >= logIntervalSeconds) {
@@ -5761,29 +5350,29 @@ void OnTick()
             
             Print("");
             Print("---------------------------------------------------------------");
-            Print("VALORI ORGANICI CALCOLATI DINAMICAMENTE");
+            Print("?? VALORI ORGANICI CALCOLATI DINAMICAMENTE");
             Print("---------------------------------------------------------------");
             
             if (g_vote_M5_active && ArraySize(tfData_M5.atr) > 0 && ArraySize(tfData_M5.adx) > 0) {
-                PrintFormat("[M5] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + decay*std=%.1f)",
+                PrintFormat("[M5] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + 1/f*std=%.1f)",
                     tfData_M5.atr[ArraySize(tfData_M5.atr)-1], tfData_M5.atr_avg,
                     tfData_M5.adx[ArraySize(tfData_M5.adx)-1], tfData_M5.adx_threshold,
                     tfData_M5.adx_avg, tfData_M5.adx_stddev);
             }
             if (g_vote_H1_active && ArraySize(tfData_H1.atr) > 0 && ArraySize(tfData_H1.adx) > 0) {
-                PrintFormat("[H1] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + decay*std=%.1f)",
+                PrintFormat("[H1] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + 1/f*std=%.1f)",
                     tfData_H1.atr[ArraySize(tfData_H1.atr)-1], tfData_H1.atr_avg,
                     tfData_H1.adx[ArraySize(tfData_H1.adx)-1], tfData_H1.adx_threshold,
                     tfData_H1.adx_avg, tfData_H1.adx_stddev);
             }
             if (g_vote_H4_active && ArraySize(tfData_H4.atr) > 0 && ArraySize(tfData_H4.adx) > 0) {
-                PrintFormat("[H4] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + decay*std=%.1f)",
+                PrintFormat("[H4] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + 1/f*std=%.1f)",
                     tfData_H4.atr[ArraySize(tfData_H4.atr)-1], tfData_H4.atr_avg,
                     tfData_H4.adx[ArraySize(tfData_H4.adx)-1], tfData_H4.adx_threshold,
                     tfData_H4.adx_avg, tfData_H4.adx_stddev);
             }
             if (g_vote_D1_active && ArraySize(tfData_D1.atr) > 0 && ArraySize(tfData_D1.adx) > 0) {
-                PrintFormat("[D1] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + decay*std=%.1f)",
+                PrintFormat("[D1] ATR: corrente=%.5f avg=%.5f | ADX: corrente=%.1f soglia=%.1f (avg=%.1f + 1/f*std=%.1f)",
                     tfData_D1.atr[ArraySize(tfData_D1.atr)-1], tfData_D1.atr_avg,
                     tfData_D1.adx[ArraySize(tfData_D1.adx)-1], tfData_D1.adx_threshold,
                     tfData_D1.adx_avg, tfData_D1.adx_stddev);
@@ -5974,16 +5563,16 @@ int ExecuteVotingLogic()
     static datetime lastVoteDisabledLog = 0;
     if (!EnableIndicatorVoteSystem) {
         datetime now = TimeCurrent();
-        // Log throttle: naturalPeriod * secondi per barra / scale(H) (derivato dai DATI!)
-        // FIX: Protezione quando naturalPeriod = 0
+        // ?? Log throttle: naturalPeriod � secondi per barra (derivato dai DATI!)
+        // ?? FIX: Protezione quando naturalPeriod = 0
         int naturalPeriod = MathMax(1, g_organic_M5.naturalPeriod);  // Minimo 1 per evitare divisione per zero
-        int throttleSeconds = (int)MathRound(naturalPeriod * 60 * GetOrganicDecay(g_hurstGlobal));
-        // Minimo = 8 secondi
-        int minThrottle = GetBufferSmall();  // 8
+        int throttleSeconds = (int)MathRound(naturalPeriod * 60 / PHI);
+        // ?? Minimo organico = f4 � 7 secondi
+        int minThrottle = (int)MathRound(MathPow(PHI, 4));
         throttleSeconds = MathMax(minThrottle, throttleSeconds);
         
         if (now - lastVoteDisabledLog >= throttleSeconds || lastVoteDisabledLog == 0) {
-            Print("[VOTE] Sistema voti indicatori DISATTIVATO (EnableIndicatorVoteSystem=false) - decisione neutra");
+            Print("[VOTE] Sistema voti indicatori DISATTIVATO (EnableIndicatorVoteSystem=false) ? decisione neutra");
             lastVoteDisabledLog = now;
         }
         return 0;
@@ -6283,22 +5872,20 @@ int ExecuteVotingLogic()
     int obvDivergenceSignal = UpdateOBVDivergence();
     
     // ═══════════════════════════════════════════════════════════════
-    // v1.1: MEAN-REVERSION = UN SOLO VOTO COMBINATO
+    // 🌱 v1.1: MEAN-REVERSION = UN SOLO VOTO COMBINATO
     // Combina RSI + Stochastic + OBV in un UNICO segnale data-driven
     // Poi applica questo voto a OGNI TIMEFRAME attivo
     // ═══════════════════════════════════════════════════════════════
     
-    // STEP 1: Calcola segnale combinato (gia fatto in GetReversalSignal)
+    // STEP 1: Calcola segnale combinato (già fatto in GetReversalSignal)
     // Ma qui vogliamo la versione semplificata per il voto
     double meanRevCombinedStrength = 0.0;
     int meanRevCombinedSignal = 0;  // +1=BUY, -1=SELL, 0=NEUTRO
     
-    // PESI ORGANICI Hurst-driven per combinazione
-    double scale = GetOrganicScale(g_hurstGlobal);
-    double decay = GetOrganicDecay(g_hurstGlobal);
-    double w_rsi = scale;         // RSI divergence = peso scale(H) (piu affidabile)
+    // 🌱 PESI ORGANICI φ-derivati per combinazione
+    double w_rsi = PHI;           // RSI divergence = peso φ (più affidabile)
     double w_obv = 1.0;           // OBV divergence = peso 1
-    double w_stoch = decay;       // Stochastic = peso decay(H)
+    double w_stoch = PHI_INV;     // Stochastic = peso φ⁻¹
     
     double combinedScore = 0.0;
     double combinedMax = 0.0;
@@ -6316,49 +5903,48 @@ int ExecuteVotingLogic()
         combinedMax += w_stoch;
     }
     
-    // SOGLIA DA HURST: segnale valido solo se forza >= decay(H) (~0.62 per H=0.7)
-    double meanRevThreshold = GetOrganicDecay(g_hurstGlobal);  // Soglia data-driven da Hurst
+    // 🌱 SOGLIA DATA-DRIVEN: segnale valido solo se forza > φ⁻² (≈38%)
     if (combinedMax > 0) {
         meanRevCombinedStrength = MathAbs(combinedScore) / combinedMax;
-        if (meanRevCombinedStrength >= meanRevThreshold) {
+        if (meanRevCombinedStrength >= PHI_INV_SQ) {  // Soglia ≈ 38%
             meanRevCombinedSignal = (combinedScore > 0) ? 1 : -1;
         }
     }
     
     // STEP 2: Applica il VOTO UNICO a OGNI TF attivo
-    // Peso = decay(H) * peso_TF (mean-reversion = contrarian, peso ridotto)
+    // Peso = φ⁻¹ × peso_TF (mean-reversion = contrarian, peso ridotto)
     double meanRevScore = 0.0;
     double meanRevMaxScore = 0.0;
     
-    // Calcola SEMPRE il max possibile (anche se segnale neutro)
+    // 🌱 Calcola SEMPRE il max possibile (anche se segnale neutro)
     // Questo serve per mantenere scorePct stabile
     if (enableRSI || enableOBV || enableStoch) {
-        if (g_vote_M5_active) meanRevMaxScore += g_organic_M5.weight * decay;
-        if (g_vote_H1_active) meanRevMaxScore += g_organic_H1.weight * decay;
-        if (g_vote_H4_active) meanRevMaxScore += g_organic_H4.weight * decay;
-        if (g_vote_D1_active) meanRevMaxScore += g_organic_D1.weight * decay;
+        if (g_vote_M5_active) meanRevMaxScore += g_organic_M5.weight * PHI_INV;
+        if (g_vote_H1_active) meanRevMaxScore += g_organic_H1.weight * PHI_INV;
+        if (g_vote_H4_active) meanRevMaxScore += g_organic_H4.weight * PHI_INV;
+        if (g_vote_D1_active) meanRevMaxScore += g_organic_D1.weight * PHI_INV;
     }
     
     // Applica voto solo se segnale attivo
     if (meanRevCombinedSignal != 0) {
         if (g_vote_M5_active) {
-            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_M5.weight * decay;
+            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_M5.weight * PHI_INV;
         }
         if (g_vote_H1_active) {
-            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_H1.weight * decay;
+            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_H1.weight * PHI_INV;
         }
         if (g_vote_H4_active) {
-            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_H4.weight * decay;
+            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_H4.weight * PHI_INV;
         }
         if (g_vote_D1_active) {
-            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_D1.weight * decay;
+            meanRevScore += meanRevCombinedSignal * meanRevCombinedStrength * g_organic_D1.weight * PHI_INV;
         }
     }
     
-    // AGGIUNGI MEAN-REVERSION AL TOTALE
+    // 🌱 AGGIUNGI MEAN-REVERSION AL TOTALE
     totalScore += meanRevScore;
     
-    // LOG DIAGNOSTICO SCORE - SEMPRE VISIBILE
+    // 🔍 LOG DIAGNOSTICO SCORE - SEMPRE VISIBILE
     if (g_enableLogsEffective) {
         // Score trend-following (senza mean-reversion)
         double trendScore = totalScore - meanRevScore;
@@ -6387,21 +5973,21 @@ int ExecuteVotingLogic()
         }
         
         // Mostra sempre il pannello mean-reversion
-        Print("  === MEAN-REVERSION (voto combinato per ogni TF) ===");
+        Print("  ═══ 🔄 MEAN-REVERSION (voto combinato per ogni TF) ═══");
         PrintFormat("  RSI: %s | OBV: %s | Stoch: %s", rsiStatus, obvStatus, stochStatus);
         
         if (meanRevCombinedSignal != 0) {
-            PrintFormat("  SEGNALE COMBINATO: %s (forza %.0f%% >= soglia %.0f%%)", 
-                meanRevCombinedSignal > 0 ? "BUY" : "SELL",
-                meanRevCombinedStrength * 100, meanRevThreshold * 100);
-            PrintFormat("  VOTO AGGIUNTO: %+.3f su %d TF attivi", meanRevScore, 
+            PrintFormat("  📊 SEGNALE COMBINATO: %s (forza %.0f%% >= soglia %.0f%%)", 
+                meanRevCombinedSignal > 0 ? "🟢 BUY" : "🔴 SELL",
+                meanRevCombinedStrength * 100, PHI_INV_SQ * 100);
+            PrintFormat("  📊 VOTO AGGIUNTO: %+.3f su %d TF attivi", meanRevScore, 
                 (g_vote_M5_active?1:0) + (g_vote_H1_active?1:0) + (g_vote_H4_active?1:0) + (g_vote_D1_active?1:0));
         } else {
-            PrintFormat("  SEGNALE: NEUTRO (forza %.0f%% < soglia %.0f%% oppure nessun segnale)",
-                meanRevCombinedStrength * 100, meanRevThreshold * 100);
+            PrintFormat("  📊 SEGNALE: ⚪ NEUTRO (forza %.0f%% < soglia %.0f%% oppure nessun segnale)",
+                meanRevCombinedStrength * 100, PHI_INV_SQ * 100);
         }
         
-        PrintFormat("[TOTALE] TREND(%+.2f) + MEAN-REV(%+.2f) = %+.2f", 
+        PrintFormat("[📊 TOTALE] TREND(%+.2f) + MEAN-REV(%+.2f) = %+.2f", 
             trendScore, meanRevScore, totalScore);
         
         if (totalScore > 0)
@@ -6423,38 +6009,37 @@ int ExecuteVotingLogic()
     
     // ?? CALCOLA SCORE MASSIMO POSSIBILE (organico)
     // Ogni indicatore attivo contribuisce peso_TF al massimo (max �1.0 * peso)
-    // Max = num_indicatori_attivi * S(peso_TF_attivi) * 1.0
+    // Max = num_indicatori_attivi � S(peso_TF_attivi) � 1.0
     double maxScorePossible = 0.0;
     
-    // FIX: Conta separatamente indicatori DIREZIONALI e MEAN-REVERSION
-    // ADX = FILTER (vota solo se trend), Mean-reversion vota nella direzione inversione
-    // v1.1 FIX: Calcola peso TOTALE indicatori considerando le CATEGORIE
+    // ?? FIX: Conta separatamente indicatori DIREZIONALI e MEAN-REVERSION
+    // ADX � FILTER (vota solo se trend), Mean-reversion vota nella direzione inversione
+    // ?? v1.1 FIX: Calcola peso TOTALE indicatori considerando le CATEGORIE
     // TREND PRIMARY (peso 1.0): EMA, MACD, PSAR, SMA, Ichimoku
-    // TREND SUPPORT (peso decay ~ 0.6): BB, Heikin  
+    // TREND SUPPORT (peso φ⁻¹≈0.618): BB, Heikin  
     // TREND FILTER (peso 1.0, condizionale): ADX
     double weightTrendPrimary = 0.0;    // Peso totale indicatori primari
     double weightTrendSupport = 0.0;    // Peso totale indicatori supporto
     double weightTrendFilter = 0.0;     // Peso totale indicatori filtro
     
-    // TREND PRIMARY (peso 1.0 ciascuno)
+    // ?? TREND PRIMARY (peso 1.0 ciascuno)
     if (enableEMA) weightTrendPrimary += 1.0;
     if (enableMACD) weightTrendPrimary += 1.0;
     if (enablePSAR) weightTrendPrimary += 1.0;
     if (enableSMA) weightTrendPrimary += 1.0;
     if (enableIchimoku) weightTrendPrimary += 1.0;
     
-    // TREND SUPPORT (peso decay(H) ~ 0.6 ciascuno)
-    double decayWeight = GetOrganicDecay(g_hurstGlobal);
-    if (enableBB) weightTrendSupport += decayWeight;
-    if (enableHeikin) weightTrendSupport += decayWeight;
+    // ?? TREND SUPPORT (peso φ⁻¹ ≈ 0.618 ciascuno)
+    if (enableBB) weightTrendSupport += PHI_INV;      // ≈ 0.618
+    if (enableHeikin) weightTrendSupport += PHI_INV;  // ≈ 0.618
     
-    // TREND FILTER (peso 1.0, ma vota solo se ADX > soglia)
+    // ?? TREND FILTER (peso 1.0, ma vota solo se ADX > soglia)
     if (enableADX) weightTrendFilter += 1.0;
     
-    // Peso TOTALE indicatori per ogni TF = PRIMARY + SUPPORT + FILTER
+    // ?? Peso TOTALE indicatori per ogni TF = PRIMARY + SUPPORT + FILTER
     double totalIndicatorWeight = weightTrendPrimary + weightTrendSupport + weightTrendFilter;
     
-    // Max score TREND = somma dei pesi organici TF * peso totale indicatori (con categoria)
+    // ?? Max score TREND = somma dei pesi organici TF × peso totale indicatori (con categoria)
     if (g_vote_M5_active) maxScorePossible += g_organic_M5.weight * totalIndicatorWeight;
     if (g_vote_H1_active) maxScorePossible += g_organic_H1.weight * totalIndicatorWeight;
     if (g_vote_H4_active) maxScorePossible += g_organic_H4.weight * totalIndicatorWeight;
@@ -6468,39 +6053,40 @@ int ExecuteVotingLogic()
     bool isBuy = (totalScore > 0);
     bool isSell = (totalScore < 0);
     
-    // v1.1: GetReversalSignal per tracciare statistiche (soglia data-driven)
-    // I detector sono gia stati chiamati sopra, questa chiamata aggiorna solo il buffer storico
+    // ?? v1.1: GetReversalSignal per tracciare statistiche (soglia data-driven)
+    // I detector sono gi� stati chiamati sopra, questa chiamata aggiorna solo il buffer storico
     double reversalStrength = 0.0;
     int reversalSignal = GetReversalSignal(reversalStrength);
     
-    // AGGIUNGI SCORE AL BUFFER STORICO (per soglia automatica)
-    // INPUT: scorePct >= 0 (validato sopra)
+    // ?? AGGIUNGI SCORE AL BUFFER STORICO (per soglia automatica)
+    // ? INPUT: scorePct >= 0 (validato sopra)
     AddScoreToHistory(scorePct);
     
-    // OTTIENI SOGLIA CORRENTE (automatica o manuale, con fallback)
+    // ?? OTTIENI SOGLIA CORRENTE (automatica o manuale, con fallback)
     double currentThreshold = GetCurrentThreshold();
-    
-    // Minimo campioni per soglia automatica = 16 (BUFFER_SIZE_MEDIUM)
-    int minSamplesForLog = GetBufferMedium();
     
     // Log se stiamo usando fallback
     if (AutoScoreThreshold && !g_scoreThresholdReady && g_enableLogsEffective) {
-        PrintFormat("[VOTE] Soglia auto non pronta, uso fallback manuale: %.1f%% (buffer: %d/%d)", 
+        // ?? Minimo campioni = f5 � 11 (derivato organicamente)
+        int minSamplesOrg = (int)MathRound(MathPow(PHI, 5));
+        int minSamplesForLog = MathMax(minSamplesOrg, (int)MathCeil(SCORE_HISTORY_MAX * PHI_INV_SQ * PHI_INV));
+        PrintFormat("[VOTE] ?? Soglia auto non pronta, uso fallback manuale: %.1f%% (buffer: %d/%d)", 
             ScoreThreshold, g_scoreHistorySize, minSamplesForLog);
     }
     
-    // LOG DIAGNOSTICO
+    // ?? LOG DIAGNOSTICO
     if (g_enableLogsEffective) {
-        // ANALISI: distingui chiaramente il tipo di soglia usata
+        // ? ANALISI: distingui chiaramente il tipo di soglia usata
         string thresholdType;
         if (!AutoScoreThreshold) 
             thresholdType = "MANUALE";
         else if (g_scoreThresholdReady)
             thresholdType = "AUTO";
         else
-            thresholdType = StringFormat("FALLBACK:%d/%d", g_scoreHistorySize, minSamplesForLog);
+            thresholdType = StringFormat("FALLBACK:%d/%d", g_scoreHistorySize, 
+                MathMax((int)MathRound(MathPow(PHI, 5)), (int)MathCeil(SCORE_HISTORY_MAX * PHI_INV_SQ * PHI_INV)));
         
-        PrintFormat("[SCORE DEBUG] Score: %+.2f | Max: %.2f | Pct: %.2f%% | Soglia: %.1f%% (%s)",
+        PrintFormat("[SCORE DEBUG] 🌱 Score: %+.2f | Max: %.2f | Pct: %.2f%% | Soglia: %.1f%% (%s)",
             totalScore, maxScorePossible, scorePct, currentThreshold, thresholdType);
         PrintFormat("   Peso indicatori: %.2f (PRIMARY:%.0f + SUPPORT:%.2f + FILTER:%.0f) | Direzione: %s", 
             totalIndicatorWeight, weightTrendPrimary, weightTrendSupport, weightTrendFilter,
@@ -6508,10 +6094,10 @@ int ExecuteVotingLogic()
     }
     
     // ---------------------------------------------------------------
-    // LOGICA DECISIONALE ORGANICA v1.1
+    // ?? LOGICA DECISIONALE ORGANICA v1.1
     // 
-    // NUOVA LOGICA: Mean-reversion VOTA (non blocca)
-    // Il mean-reversion aggiunge gia il suo contributo al totalScore
+    // ?? NUOVA LOGICA: Mean-reversion VOTA (non blocca)
+    // Il mean-reversion aggiunge gi� il suo contributo al totalScore
     // nella direzione dell'inversione attesa
     // 
     // REGOLE:
@@ -6530,14 +6116,14 @@ int ExecuteVotingLogic()
         decision = -1;
     }
     
-    // STEP 2: Score DEBOLE ma REVERSAL FORTE nella stessa direzione - entry anticipato
+    // STEP 2: Score DEBOLE ma REVERSAL FORTE nella stessa direzione ? entry anticipato
     if (decision == 0 && reversalSignal != 0 && reversalStrength >= g_reversalThreshold) {
         // Score deve essere almeno nella stessa direzione del reversal
         bool directionMatch = (reversalSignal == 1 && totalScore >= 0) || 
                               (reversalSignal == -1 && totalScore <= 0);
         
-        // Soglia ridotta = soglia * decay(H) (circa 60-70% della normale)
-        double reversalThreshold = currentThreshold * GetOrganicDecay(g_hurstGlobal);
+        // Soglia ridotta = soglia � f?� (circa 62% della normale)
+        double reversalThreshold = currentThreshold * PHI_INV;
         
         if (directionMatch && scorePct >= reversalThreshold) {
             decision = reversalSignal;
@@ -6546,14 +6132,14 @@ int ExecuteVotingLogic()
     }
     
     // ---------------------------------------------------------------
-    // LOG UNICO E CHIARO
+    // ?? LOG UNICO E CHIARO
     // ---------------------------------------------------------------
     if (decision != 0) {
-        string decisionText = (decision == 1) ? "BUY" : "SELL";
+        string decisionText = (decision == 1) ? "?? BUY" : "?? SELL";
         
         if (reversalBoost) {
             // Trade ANTICIPATO grazie a reversal
-            PrintFormat("[VOTE] %s ANTICIPATO | Score: %.1f%% + Reversal %s (forza %.0f%%)",
+            PrintFormat("[VOTE] ? %s ANTICIPATO | Score: %.1f%% + Reversal %s (forza %.0f%%)",
                 decisionText, scorePct,
                 reversalSignal == 1 ? "BULLISH" : "BEARISH", reversalStrength * 100);
         } else if (meanRevScore != 0 && ((meanRevScore > 0 && decision == 1) || (meanRevScore < 0 && decision == -1))) {
