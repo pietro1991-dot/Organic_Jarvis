@@ -756,9 +756,11 @@ struct TimeFrameData {
     // CENTRI ADATTIVI HURST-DRIVEN - Calcolati da CalculateEmpiricalThresholds()
     // Metodo varia in base al regime: EMA (trending), Mediana (random), TrimmedMean (reverting)
     double rsi_center;      // Centro adattivo RSI ultime N barre
+    double stoch_center;    // Centro adattivo Stochastic ultime N barre
     
     // SCALE EMPIRICHE - Derivate dalla volatilita dei dati
     double rsi_scale;       // Stdev empirico RSI * scale(H)
+    double stoch_scale;     // Stdev empirico Stochastic * scale(H)
     double obv_scale;       // Stdev empirico variazioni OBV * scale(H)
     
     // ADX PERCENTILI - Derivati dalla distribuzione storica
@@ -1359,17 +1361,22 @@ void RecalculateOrganicSystem()
         //    - g_hurstConfidence in [0, 1] (validato in GetHurstConfidence)
         //    - normFactor > 0 quando usato
         // ---------------------------------------------------------------
-        //  FIX: Check esplicito g_hurstStdev > 0 (pu� essere 0 se tutti i valori Hurst sono identici)
-        if (!g_hurstZoneReady || g_hurstStdev <= 0) {
-            g_hurstTradeScore = 0.0;  // ✅ Zona non pronta o stdev invalida → 0 (sicuro)
+        //  FIX: Check esplicito g_hurstStdev > 0 (può essere 0 se tutti i valori Hurst sono identici)
+        if (!g_hurstZoneReady) {
+            g_hurstTradeScore = 0.0;  // ✅ Zona non pronta → 0 (sicuro)
+        } else if (g_hurstStdev <= 0.001) {
+            // 🔧 FIX: Se stdev ≈ 0, mercato molto stabile - PERMETTI trading!
+            // Non abbiamo abbastanza variabilità per giudicare, quindi non bloccare
+            g_hurstTradeScore = g_tradeScoreThreshold + 0.01;  // Sopra soglia = permetti
         } else {
             double deviation = MathAbs(g_hurstComposite - g_hurstCenter);  // ✅ >= 0
             // 🌱 Normalizzazione: dividi per (stdev * scale(H)) - scala 100% dai dati
             double normFactor = g_hurstStdev * GetOrganicScale(g_hurstGlobal);
-            if (normFactor > 0) {
+            if (normFactor > 0.001) {
                 g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ✅ >= 0
             } else {
-                g_hurstTradeScore = 0.0;  // ✅ Fallback sicuro
+                // 🔧 FIX: normFactor molto piccolo = permetti trading
+                g_hurstTradeScore = g_tradeScoreThreshold + 0.01;
             }
         }
         
@@ -1414,19 +1421,47 @@ void RecalculateOrganicSystem()
         if (g_tradeScoreHistorySize >= minTradeScoreSamples) {
             //  VALIDATO: Media O(1) - divisione sicura (minTradeScoreSamples >= 1)
             double meanTS = g_tradeScoreSum / g_tradeScoreHistorySize;
-            //  VALIDATO: Varianza O(1): E[X�] - E[X]� con protezione negativa
+            //  VALIDATO: Varianza O(1): E[X²] - E[X]² con protezione negativa
             double meanSqTS = g_tradeScoreSumSq / g_tradeScoreHistorySize;
             double varianceTS = meanSqTS - (meanTS * meanTS);
             double stdevTS = (varianceTS > 0) ? MathSqrt(varianceTS) : 0.0;
-            g_tradeScoreThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);  // ✓ >= 0
+            double rawThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);
+            
+            // 🔧 FIX: Limita soglia massima per evitare blocco permanente
+            // Soglia max = media + 2*stdev (copre ~95% distribuzione normale)
+            double maxThreshold = meanTS + 2.0 * stdevTS;
+            // Soglia min = media * decay (permetti almeno alcuni trade)
+            double minThreshold = meanTS * GetOrganicDecay(g_hurstGlobal);
+            g_tradeScoreThreshold = MathMax(minThreshold, MathMin(maxThreshold, rawThreshold));
             g_tradeScoreReady = true;
         } else {
-            g_tradeScoreReady = false;
+            // 🔧 FIX: Con dati insufficienti, usa fallback invece di bloccare
+            if (g_tradeScoreHistorySize > 0) {
+                double meanTS = g_tradeScoreSum / g_tradeScoreHistorySize;
+                g_tradeScoreThreshold = meanTS;  // Solo media, senza stdev
+            } else {
+                g_tradeScoreThreshold = 0;  // Permetti tutti i trade
+            }
+            g_tradeScoreReady = true;  // 🔧 FORZA READY per evitare blocco!
         }
         
         //  DECISIONE TRADE: richiede zona Hurst + soglia tradeScore pronte
         g_hurstReady = (g_hurstZoneReady && g_tradeScoreReady);
         g_hurstAllowTrade = g_hurstReady && (g_hurstTradeScore >= g_tradeScoreThreshold);
+        
+        // 🔧 LOG DIAGNOSTICO PERIODICO (anche in backtest) per debugging blocchi
+        static int recalcCount = 0;
+        recalcCount++;
+        // Protezione overflow
+        if (recalcCount > 1000000) recalcCount = 51;
+        if (recalcCount == 1 || recalcCount == 10 || recalcCount % 50 == 0) {
+            PrintFormat("[HURST DIAG #%d] H=%.3f Centro=%.3f Stdev=%.4f | TradeScore=%.4f %s Soglia=%.4f → %s",
+                recalcCount, g_hurstComposite, g_hurstCenter, g_hurstStdev,
+                g_hurstTradeScore, 
+                g_hurstTradeScore >= g_tradeScoreThreshold ? ">=" : "<",
+                g_tradeScoreThreshold,
+                g_hurstAllowTrade ? "TRADE OK" : "BLOCCATO");
+        }
         
         lastHurstRecalc = TimeCurrent();
     }
@@ -1902,40 +1937,57 @@ void PreloadHurstBufferFromHistory()
     
     // 🔬 FIX: Protezione divisione per zero - nessun campione valido
     if (g_hurstHistorySize == 0) {
-        PrintFormat("[PRELOAD] ⚠️ Nessun campione Hurst valido - pre-caricamento fallito");
-        return;
+        // 🔧 FALLBACK: Usa valori di default per permettere trading
+        g_hurstCenter = HURST_DEFAULT;  // 0.5 = random walk
+        g_hurstStdev = (HURST_RANGE_MAX - HURST_RANGE_MIN) / 4.0;  // ~0.2 (stima conservativa)
+        g_hurstZoneMargin = g_hurstStdev * GetOrganicDecay(HURST_DEFAULT);
+        g_hurstRandomLow = g_hurstCenter - g_hurstZoneMargin;
+        g_hurstRandomHigh = g_hurstCenter + g_hurstZoneMargin;
+        g_hurstZoneReady = true;  // 🔧 FORZA READY con fallback
+        PrintFormat("[PRELOAD] ⚠️ Nessun campione Hurst valido - FALLBACK centro=%.2f zona=[%.2f, %.2f]", 
+            g_hurstCenter, g_hurstRandomLow, g_hurstRandomHigh);
+        // Continua comunque per calcolare TradeScore
     }
     
     // Minimo campioni = decay^2 del buffer (~25% per H=0.5)
     double minFractionPreload = GetOrganicDecayPow(HURST_DEFAULT, 2.0);
     int minSamples = (int)MathCeil(HURST_HISTORY_MAX * minFractionPreload);
-    if (g_hurstHistorySize < minSamples) {
-        PrintFormat("[PRELOAD] ⚠️ Pre-caricamento parziale Hurst: solo %d campioni validi", successCount);
-        return;
+    if (g_hurstHistorySize > 0 && g_hurstHistorySize < minSamples) {
+        // 🔧 FIX: Anche con dati parziali, calcola comunque zona (non bloccare!)
+        PrintFormat("[PRELOAD] ⚠️ Pre-caricamento parziale Hurst: %d/%d campioni - calcolo comunque", 
+            successCount, minSamples);
+        // Continua invece di return!
     }
     
-    // 🔬 ✓ Calcola centro O(1) - divisione sicura (g_hurstHistorySize > 0 garantito)
-    g_hurstCenter = g_hurstSum / g_hurstHistorySize;
+    // 🔬 ✓ Calcola centro O(1) - divisione sicura (g_hurstHistorySize > 0 garantito dopo fallback)
+    if (g_hurstHistorySize > 0) {
+        g_hurstCenter = g_hurstSum / g_hurstHistorySize;
+        
+        // 🔬 ✓ Calcola stdev O(1): Var(X) = E[X²] - E[X]² con protezione negativa
+        double meanSq = g_hurstSumSq / g_hurstHistorySize;
+        double variance = meanSq - (g_hurstCenter * g_hurstCenter);
+        g_hurstStdev = (variance > 0) ? MathSqrt(variance) : 0.0;  // ✓ >= 0
+        
+        // Calcola margine e zona usando decay dinamico
+        double globalDecay = GetOrganicDecay(g_hurstGlobal);
+        double globalScale = GetOrganicScale(g_hurstGlobal);  // 2^H
+        double newMargin = g_hurstStdev * globalDecay;
+        double minMargin = g_hurstStdev * globalDecay * globalDecay;  // decay^2 ~ 0.25
+        double maxMargin = g_hurstStdev * globalScale;  // scale(H) ~ 1.4-1.6
+        g_hurstZoneMargin = MathMax(minMargin, MathMin(maxMargin, newMargin));  // ✓ >= 0
+        
+        g_hurstRandomLow = g_hurstCenter - g_hurstZoneMargin;
+        g_hurstRandomHigh = g_hurstCenter + g_hurstZoneMargin;
+        g_hurstZoneReady = true;
+        
+        PrintFormat("[PRELOAD] ✓ Buffer Hurst: %d/%d | Centro=%.4f Stdev=%.4f Zona=[%.4f, %.4f]", 
+            successCount, samplesToPreload, g_hurstCenter, g_hurstStdev, g_hurstRandomLow, g_hurstRandomHigh);
+    }
+    // Se g_hurstHistorySize == 0, il fallback è già stato impostato sopra
     
-    // 🔬 ✓ Calcola stdev O(1): Var(X) = E[X²] - E[X]² con protezione negativa
-    double meanSq = g_hurstSumSq / g_hurstHistorySize;
-    double variance = meanSq - (g_hurstCenter * g_hurstCenter);
-    g_hurstStdev = (variance > 0) ? MathSqrt(variance) : 0.0;  // ✓ >= 0
-    
-    // Calcola margine e zona usando decay dinamico
+    // Variabili per FASE 3 - usa fallback se non calcolate
     double globalDecay = GetOrganicDecay(g_hurstGlobal);
-    double globalScale = GetOrganicScale(g_hurstGlobal);  // 2^H
-    double newMargin = g_hurstStdev * globalDecay;
-    double minMargin = g_hurstStdev * globalDecay * globalDecay;  // decay^2 ~ 0.25
-    double maxMargin = g_hurstStdev * globalScale;  // scale(H) ~ 1.4-1.6
-    g_hurstZoneMargin = MathMax(minMargin, MathMin(maxMargin, newMargin));  // ✓ >= 0
-    
-    g_hurstRandomLow = g_hurstCenter - g_hurstZoneMargin;
-    g_hurstRandomHigh = g_hurstCenter + g_hurstZoneMargin;
-    g_hurstZoneReady = true;
-    
-    PrintFormat("[PRELOAD] ✓ Buffer Hurst: %d/%d | Centro=%.4f Stdev=%.4f Zona=[%.4f, %.4f]", 
-        successCount, samplesToPreload, g_hurstCenter, g_hurstStdev, g_hurstRandomLow, g_hurstRandomHigh);
+    double globalScale = GetOrganicScale(g_hurstGlobal);
     
     // ---------------------------------------------------------------
     // FASE 3: Calcola TradeScore per ogni campione Hurst e riempi buffer
@@ -2002,13 +2054,28 @@ void PreloadHurstBufferFromHistory()
         double varianceTS = meanSqTS - (meanTS * meanTS);
         double stdevTS = (varianceTS > 0) ? MathSqrt(varianceTS) : 0.0;
         
-        g_tradeScoreThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);  // ✅ >= 0
+        double rawThreshold = meanTS + stdevTS * GetOrganicDecay(g_hurstGlobal);
+        // 🔧 FIX: Limita soglia massima per evitare blocco permanente
+        double maxThreshold = meanTS + 2.0 * stdevTS;
+        double minThreshold = meanTS * GetOrganicDecay(g_hurstGlobal);
+        g_tradeScoreThreshold = MathMax(minThreshold, MathMin(maxThreshold, rawThreshold));
         g_tradeScoreReady = true;
         
-        PrintFormat("[PRELOAD] ✅ Buffer TradeScore: %d/%d | Soglia=%.4f", 
-            tradeScoreCount, TRADE_SCORE_HISTORY_MAX, g_tradeScoreThreshold);
+        PrintFormat("[PRELOAD] ✅ Buffer TradeScore: %d/%d | Soglia=%.4f (range: %.4f-%.4f)", 
+            tradeScoreCount, TRADE_SCORE_HISTORY_MAX, g_tradeScoreThreshold, minThreshold, maxThreshold);
     } else {
-        PrintFormat("[PRELOAD] ⚠️ TradeScore parziale: solo %d campioni", tradeScoreCount);
+        // 🔧 FIX: Se non abbiamo abbastanza campioni, usa FALLBACK per permettere trading!
+        // Soglia fallback = 0 (permetti tutti i trade finché non abbiamo dati)
+        // Questo evita il blocco permanente del warm-up
+        if (tradeScoreCount > 0) {
+            double meanTS = g_tradeScoreSum / g_tradeScoreHistorySize;
+            g_tradeScoreThreshold = meanTS;  // Usa solo media, senza stdev
+        } else {
+            g_tradeScoreThreshold = 0;  // Permetti tutti i trade
+        }
+        g_tradeScoreReady = true;  // 🔧 FORZA READY per evitare blocco!
+        PrintFormat("[PRELOAD] ⚠️ TradeScore parziale: %d campioni - FALLBACK soglia=%.4f (trading permesso)", 
+            tradeScoreCount, g_tradeScoreThreshold);
     }
     
     // ---------------------------------------------------------------
@@ -2018,9 +2085,16 @@ void PreloadHurstBufferFromHistory()
     // ---------------------------------------------------------------
     g_hurstReady = (g_hurstZoneReady && g_tradeScoreReady);
     
-    if (g_hurstReady && lastValidIndex >= 0) {
-        // Usa l'ultimo Hurst valido (il pi� recente, tracciato da lastValidIndex)
-        double lastHurst = hurstValues[lastValidIndex];  // ? Gi� validato nel range organico
+    if (g_hurstReady) {
+        // 🔧 FIX: Gestisci anche caso fallback (lastValidIndex < 0)
+        double lastHurst;
+        if (lastValidIndex >= 0) {
+            // Usa l'ultimo Hurst valido (il più recente, tracciato da lastValidIndex)
+            lastHurst = hurstValues[lastValidIndex];  // ✓ Già validato nel range organico
+        } else {
+            // FALLBACK: Usa centro Hurst (già impostato dal fallback sopra)
+            lastHurst = g_hurstCenter;
+        }
         g_hurstComposite = lastHurst;
         
         // ✅ Calcola g_hurstConfidence (stessa logica di GetHurstConfidence)
@@ -2033,7 +2107,8 @@ void PreloadHurstBufferFromHistory()
         if (normFactor > 0) {
             g_hurstTradeScore = deviation * g_hurstConfidence / normFactor;  // ✅ >= 0
         } else {
-            g_hurstTradeScore = 0;  // ✅ Fallback sicuro
+            // 🔧 FALLBACK: Se normFactor == 0, permetti il trade (non bloccare)
+            g_hurstTradeScore = g_tradeScoreThreshold;  // Esattamente uguale = permesso
         }
         
         // CRITICO: Setta g_hurstAllowTrade per permettere trading!
@@ -2042,13 +2117,18 @@ void PreloadHurstBufferFromHistory()
         PrintFormat("[PRELOAD] 🌱🌱🌱 PRE-CARICAMENTO COMPLETO!");
         PrintFormat("[PRELOAD]   H_composito=%.4f | Centro=%.4f | Confidence=%.3f", 
             g_hurstComposite, g_hurstCenter, g_hurstConfidence);
-        PrintFormat("[PRELOAD]   TradeScore=%.4f %s Soglia=%.4f ? %s", 
+        PrintFormat("[PRELOAD]   TradeScore=%.4f %s Soglia=%.4f → %s", 
             g_hurstTradeScore, 
-            g_hurstTradeScore >= g_tradeScoreThreshold ? "=" : "<",
+            g_hurstTradeScore >= g_tradeScoreThreshold ? ">=" : "<",
             g_tradeScoreThreshold,
-            g_hurstAllowTrade ? "? TRADE OK" : "? BLOCCATO");
+            g_hurstAllowTrade ? "✅ TRADE OK" : "🚫 BLOCCATO");
     } else {
-        Print("[PRELOAD] ?? Pre-caricamento incompleto - warm-up richiesto");
+        // 🔧 FALLBACK FINALE: Se tutto fallisce, permetti comunque il trading
+        // Questo evita che l'EA rimanga bloccato per sempre
+        g_hurstAllowTrade = true;
+        g_hurstTradeScore = 0;
+        g_tradeScoreThreshold = 0;
+        Print("[PRELOAD] ⚠️ Pre-caricamento fallito - FALLBACK: trading permesso con filtro Hurst disabilitato");
     }
 }
 
@@ -2147,9 +2227,9 @@ void RecalculateHurstSumsFromScratch()
 
 //+------------------------------------------------------------------+
 //| ?? FILTRO HURST: Check finale prima di aprire trade              |
-//| Ritorna true se il trade � permesso, false se bloccato           |
+//| Ritorna true se il trade è permesso, false se bloccato           |
 //| NOTA: Il ricalcolo avviene ora in RecalculateOrganicSystem()     |
-//| ?? FIX: Log rimosso da qui - stampato solo se c'era segnale      |
+//| 🔧 FIX: Con fallback, non bloccare mai permanentemente           |
 //+------------------------------------------------------------------+
 bool IsTradeAllowedByHurst()
 {
@@ -2158,15 +2238,23 @@ bool IsTradeAllowedByHurst()
     // Il ricalcolo avviene ad ogni nuova barra in RecalculateOrganicSystem()
     // Qui verifichiamo solo il flag
     if (!g_hurstReady) {
-        // Log solo una volta ogni 100 barre per evitare spam
+        // Log solo una volta ogni 50 barre per evitare spam
         static int hurstNotReadyCount = 0;
         hurstNotReadyCount++;
-        if (hurstNotReadyCount == 1 || hurstNotReadyCount % 100 == 0) {
-            PrintFormat("[HURST] ? Hurst NON pronto (%d barre) - servono piu' dati per zona/stdev", hurstNotReadyCount);
+        if (hurstNotReadyCount == 1 || hurstNotReadyCount % 50 == 0) {
+            PrintFormat("[HURST] ⚠️ Hurst NON pronto (%d barre) - servono piu' dati per zona/stdev", hurstNotReadyCount);
+        }
+        // 🔧 FIX: Dopo 50 barre senza dati, permetti comunque il trading
+        // Allineato con warmup che forza completamento a 50 barre
+        if (hurstNotReadyCount > 50) {
+            if (hurstNotReadyCount == 51) {
+                Print("[HURST] 🔧 Fallback attivato: trading permesso dopo 50 barre senza dati Hurst sufficienti");
+            }
+            return true;  // Fallback: permetti trade
         }
         return false;
     }
-    // ?? FIX: Log "TRADE BLOCCATO" rimosso - stampato in ExecuteTrades solo se c'era segnale
+    // 🔧 FIX: Log "TRADE BLOCCATO" rimosso - stampato in ExecuteTrades solo se c'era segnale
     
     return g_hurstAllowTrade;
 }
@@ -2743,6 +2831,29 @@ int UpdateScoreMomentum(double currentScore)
     // Aggiungi al buffer storico per calcolo soglia
     int momentumBufferMax = GetBufferXLarge();  // 64
     
+    // ? PROTEZIONE CRITICA: Verifica dimensione array
+    int arraySize = ArraySize(g_momentumHistory);
+    if (arraySize == 0) {
+        if (g_enableLogsEffective) Print("[MOMENTUM ERROR] Array non inizializzato!");
+        return 0;
+    }
+    
+    // ? PROTEZIONE: Usa dimensione array effettiva se diversa da buffer teorico
+    if (momentumBufferMax > arraySize) {
+        momentumBufferMax = arraySize;
+    }
+    
+    // ? PROTEZIONE: Verifica indice valido PRIMA di accedere
+    if (g_momentumHistoryIndex < 0 || g_momentumHistoryIndex >= arraySize) {
+        if (g_enableLogsEffective) 
+            Print("[MOMENTUM ERROR] Indice invalido: ", g_momentumHistoryIndex, " (array size: ", arraySize, ")");
+        g_momentumHistoryIndex = 0;  // Reset a 0
+        g_momentumHistorySize = 0;
+        g_momentumSum = 0;
+        g_momentumSumSq = 0;
+        ArrayInitialize(g_momentumHistory, 0);
+    }
+    
     // Sottrai valore vecchio se buffer pieno
     if (g_momentumHistorySize == momentumBufferMax) {
         double oldValue = g_momentumHistory[g_momentumHistoryIndex];
@@ -2877,6 +2988,22 @@ void UpdateDivergenceThreshold(double strength)
 {
     // Buffer size = 16 (potenza di 2)
     int divergenceBufferMax = GetBufferMedium();  // 16
+    
+    // 🛡️ PROTEZIONE CRITICA: Verifica dimensione array
+    int arraySize = ArraySize(g_divergenceHistory);
+    if (arraySize == 0) return;  // Array non inizializzato
+    
+    // Usa dimensione effettiva se diversa
+    if (divergenceBufferMax > arraySize) divergenceBufferMax = arraySize;
+    
+    // 🛡️ PROTEZIONE: Verifica indice valido PRIMA di accedere
+    if (g_divergenceHistoryIndex < 0 || g_divergenceHistoryIndex >= arraySize) {
+        g_divergenceHistoryIndex = 0;
+        g_divergenceHistorySize = 0;
+        g_divergenceSum = 0;
+        g_divergenceSumSq = 0;
+        ArrayInitialize(g_divergenceHistory, 0);
+    }
     
     // Sottrai valore vecchio se buffer pieno (O(1))
     if (g_divergenceHistorySize == divergenceBufferMax) {
@@ -3309,6 +3436,22 @@ int GetReversalSignal(double &strength)
     // Tracciamo TUTTE le forze (anche deboli) per avere distribuzione completa
     // ---------------------------------------------------------------
     int reversalBufferMax = GetBufferXLarge();  // 64
+    
+    // 🛡️ PROTEZIONE CRITICA: Verifica dimensione array
+    int arraySize = ArraySize(g_reversalStrengthHistory);
+    if (arraySize == 0) return 0;  // Array non inizializzato
+    
+    // Usa dimensione effettiva se diversa
+    if (reversalBufferMax > arraySize) reversalBufferMax = arraySize;
+    
+    // 🛡️ PROTEZIONE: Verifica indice valido PRIMA di accedere
+    if (g_reversalHistoryIndex < 0 || g_reversalHistoryIndex >= arraySize) {
+        g_reversalHistoryIndex = 0;
+        g_reversalHistorySize = 0;
+        g_reversalSum = 0;
+        g_reversalSumSq = 0;
+        ArrayInitialize(g_reversalStrengthHistory, 0);
+    }
     
     // Sottrai valore vecchio se buffer pieno (O(1))
     if (g_reversalHistorySize == reversalBufferMax) {
@@ -4946,26 +5089,88 @@ bool UpdateLastBar(ENUM_TIMEFRAMES tf, TimeFrameData &data)
     // Seleziona handles appropriati per timeframe
     int emaH = INVALID_HANDLE, rsiH = INVALID_HANDLE, macdH = INVALID_HANDLE;
     int atrH = INVALID_HANDLE, adxH = INVALID_HANDLE, stochH = INVALID_HANDLE;
+    int bbH = INVALID_HANDLE, psarH = INVALID_HANDLE;
+    int smaFastH = INVALID_HANDLE, smaSlowH = INVALID_HANDLE, ichimokuH = INVALID_HANDLE;
+    int obvH = INVALID_HANDLE;
     
     switch(tf) {
-        case PERIOD_M5:  emaH = emaHandle_M5; rsiH = rsiHandle_M5; macdH = macdHandle_M5; atrH = atrHandle_M5; adxH = adxHandle_M5; stochH = stochHandle_M5; break;
-        case PERIOD_H1:  emaH = emaHandle_H1; rsiH = rsiHandle_H1; macdH = macdHandle_H1; atrH = atrHandle_H1; adxH = adxHandle_H1; stochH = stochHandle_H1; break;
-        case PERIOD_H4:  emaH = emaHandle_H4; rsiH = rsiHandle_H4; macdH = macdHandle_H4; atrH = atrHandle_H4; adxH = adxHandle_H4; stochH = stochHandle_H4; break;
-        case PERIOD_D1:  emaH = emaHandle_D1; rsiH = rsiHandle_D1; macdH = macdHandle_D1; atrH = atrHandle_D1; adxH = adxHandle_D1; stochH = stochHandle_D1; break;
+        case PERIOD_M5:  
+            emaH = emaHandle_M5; rsiH = rsiHandle_M5; macdH = macdHandle_M5; 
+            atrH = atrHandle_M5; adxH = adxHandle_M5; stochH = stochHandle_M5;
+            bbH = bbHandle_M5; psarH = psarHandle_M5;
+            smaFastH = smaFastHandle_M5; smaSlowH = smaSlowHandle_M5; ichimokuH = ichimokuHandle_M5;
+            obvH = obvHandle_M5;
+            break;
+        case PERIOD_H1:  
+            emaH = emaHandle_H1; rsiH = rsiHandle_H1; macdH = macdHandle_H1; 
+            atrH = atrHandle_H1; adxH = adxHandle_H1; stochH = stochHandle_H1;
+            bbH = bbHandle_H1; psarH = psarHandle_H1;
+            smaFastH = smaFastHandle_H1; smaSlowH = smaSlowHandle_H1; ichimokuH = ichimokuHandle_H1;
+            obvH = obvHandle_H1;
+            break;
+        case PERIOD_H4:  
+            emaH = emaHandle_H4; rsiH = rsiHandle_H4; macdH = macdHandle_H4; 
+            atrH = atrHandle_H4; adxH = adxHandle_H4; stochH = stochHandle_H4;
+            bbH = bbHandle_H4; psarH = psarHandle_H4;
+            smaFastH = smaFastHandle_H4; smaSlowH = smaSlowHandle_H4; ichimokuH = ichimokuHandle_H4;
+            obvH = obvHandle_H4;
+            break;
+        case PERIOD_D1:  
+            emaH = emaHandle_D1; rsiH = rsiHandle_D1; macdH = macdHandle_D1; 
+            atrH = atrHandle_D1; adxH = adxHandle_D1; stochH = stochHandle_D1;
+            bbH = bbHandle_D1; psarH = psarHandle_D1;
+            smaFastH = smaFastHandle_D1; smaSlowH = smaSlowHandle_D1; ichimokuH = ichimokuHandle_D1;
+            obvH = obvHandle_D1;
+            break;
         default: return false;
     }
     
-    // Aggiorna solo ultimi 2 valori degli indicatori chiave
+    // 🔧 FIX CRITICO: Aggiorna TUTTI gli indicatori usati per il voto!
     double tempBuf[2];
+    // Trend Primary
     if (CopyBuffer(emaH, 0, 0, 2, tempBuf) == 2) { data.ema[lastIdx] = tempBuf[1]; data.ema[lastIdx-1] = tempBuf[0]; }
-    if (CopyBuffer(rsiH, 0, 0, 2, tempBuf) == 2) { data.rsi[lastIdx] = tempBuf[1]; data.rsi[lastIdx-1] = tempBuf[0]; }
     if (CopyBuffer(macdH, 0, 0, 2, tempBuf) == 2) { data.macd[lastIdx] = tempBuf[1]; data.macd[lastIdx-1] = tempBuf[0]; }
     if (CopyBuffer(macdH, 1, 0, 2, tempBuf) == 2) { data.macd_signal[lastIdx] = tempBuf[1]; data.macd_signal[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(psarH, 0, 0, 2, tempBuf) == 2) { data.psar[lastIdx] = tempBuf[1]; data.psar[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(smaFastH, 0, 0, 2, tempBuf) == 2) { data.sma_fast[lastIdx] = tempBuf[1]; data.sma_fast[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(smaSlowH, 0, 0, 2, tempBuf) == 2) { data.sma_slow[lastIdx] = tempBuf[1]; data.sma_slow[lastIdx-1] = tempBuf[0]; }
+    // Ichimoku (4 linee)
+    if (CopyBuffer(ichimokuH, 0, 0, 2, tempBuf) == 2) { data.ichimoku_tenkan[lastIdx] = tempBuf[1]; data.ichimoku_tenkan[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(ichimokuH, 1, 0, 2, tempBuf) == 2) { data.ichimoku_kijun[lastIdx] = tempBuf[1]; data.ichimoku_kijun[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(ichimokuH, 2, 0, 2, tempBuf) == 2) { data.ichimoku_senkou_a[lastIdx] = tempBuf[1]; data.ichimoku_senkou_a[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(ichimokuH, 3, 0, 2, tempBuf) == 2) { data.ichimoku_senkou_b[lastIdx] = tempBuf[1]; data.ichimoku_senkou_b[lastIdx-1] = tempBuf[0]; }
+    // Trend Support
+    if (CopyBuffer(bbH, 1, 0, 2, tempBuf) == 2) { data.bb_upper[lastIdx] = tempBuf[1]; data.bb_upper[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(bbH, 0, 0, 2, tempBuf) == 2) { data.bb_middle[lastIdx] = tempBuf[1]; data.bb_middle[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(bbH, 2, 0, 2, tempBuf) == 2) { data.bb_lower[lastIdx] = tempBuf[1]; data.bb_lower[lastIdx-1] = tempBuf[0]; }
+    // Filters & Mean-Reversion
     if (CopyBuffer(atrH, 0, 0, 2, tempBuf) == 2) { data.atr[lastIdx] = tempBuf[1]; data.atr[lastIdx-1] = tempBuf[0]; }
     if (CopyBuffer(adxH, 0, 0, 2, tempBuf) == 2) { data.adx[lastIdx] = tempBuf[1]; data.adx[lastIdx-1] = tempBuf[0]; }
-    // 🌱 v1.1: Aggiorna Stochastic per voto inversione
+    if (CopyBuffer(rsiH, 0, 0, 2, tempBuf) == 2) { data.rsi[lastIdx] = tempBuf[1]; data.rsi[lastIdx-1] = tempBuf[0]; }
     if (CopyBuffer(stochH, 0, 0, 2, tempBuf) == 2) { data.stoch_main[lastIdx] = tempBuf[1]; data.stoch_main[lastIdx-1] = tempBuf[0]; }
     if (CopyBuffer(stochH, 1, 0, 2, tempBuf) == 2) { data.stoch_signal[lastIdx] = tempBuf[1]; data.stoch_signal[lastIdx-1] = tempBuf[0]; }
+    if (CopyBuffer(obvH, 0, 0, 2, tempBuf) == 2) { data.obv[lastIdx] = tempBuf[1]; data.obv[lastIdx-1] = tempBuf[0]; }
+    
+    // 🔧 FIX: Aggiorna anche Heikin Ashi (calcolato da rates)
+    // HA Close = (O+H+L+C)/4
+    data.ha_close[lastIdx] = (data.rates[lastIdx].open + data.rates[lastIdx].high + 
+                              data.rates[lastIdx].low + data.rates[lastIdx].close) / 4.0;
+    // HA Open = (prev HA Open + prev HA Close) / 2
+    if (lastIdx > 0) {
+        data.ha_open[lastIdx] = (data.ha_open[lastIdx-1] + data.ha_close[lastIdx-1]) / 2.0;
+    } else {
+        data.ha_open[lastIdx] = (data.rates[lastIdx].open + data.rates[lastIdx].close) / 2.0;
+    }
+    
+    // 🔧 FIX CRITICO: Ricalcola valori organici (ATR_avg, ADX_threshold, ecc.)
+    // Questi DEVONO essere aggiornati ad ogni barra, altrimenti diventano stale!
+    // Usa minBarsRequired dal data.organic (già calcolato in LoadTimeFrameData)
+    int minBarsRequired = data.organic.min_bars_required;
+    if (minBarsRequired == 0) {
+        // Fallback se non impostato: usa periodo naturale * 2
+        minBarsRequired = MathMax(10, data.organic.naturalPeriod * 2);
+    }
+    CalculateOrganicValues(data, count, minBarsRequired);
     
     return true;
 }
@@ -5151,8 +5356,20 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
 {
     // Verifica se abbiamo abbastanza dati
     if (count < minBarsRequired) {
-        Print("? [ORGANIC] Barre insufficienti: ", count, " < ", minBarsRequired, " richieste - TF DISABILITATO");
-        data.isDataReady = false;
+        // 🔧 FIX: Log più diagnostico per capire il blocco
+        static int insufficientDataCount = 0;
+        insufficientDataCount++;
+        if (insufficientDataCount <= 3 || insufficientDataCount % 20 == 0) {
+            PrintFormat("[ORGANIC WARN #%d] Barre insufficienti: %d < %d richieste", 
+                insufficientDataCount, count, minBarsRequired);
+        }
+        // 🔧 NON impostare isDataReady=false se era già true!
+        // Mantieni i dati vecchi invece di bloccare
+        if (!data.isDataReady) {
+            data.isDataReady = false;  // Solo se non era già pronto
+            return;
+        }
+        // Se era già pronto, continua con i dati esistenti (non aggiornati)
         return;
     }
     
@@ -5181,11 +5398,14 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     }
     
     if (atr_count == 0 || atr_sum <= 0) {
-        Print("? [ORGANIC] ATR invalido (count=", atr_count, ", sum=", atr_sum, ") - TF DISABILITATO");
-        data.isDataReady = false;
-        return;
+        // 🔧 FIX: Se ATR invalido, usa fallback invece di bloccare!
+        data.atr_avg = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 100;  // ~100 pips come fallback
+        if (g_enableLogsEffective) {
+            PrintFormat("[ORGANIC] ATR invalido - usando fallback: %.5f", data.atr_avg);
+        }
+    } else {
+        data.atr_avg = atr_sum / atr_count;
     }
-    data.atr_avg = atr_sum / atr_count;
     
     // ---------------------------------------------------------------
     // ADX ORGANICO: Media + decay(H) * deviazione standard
@@ -5202,11 +5422,14 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     }
     
     if (adx_count == 0) {
-        Print("? [ORGANIC] ADX dati insufficienti - TF DISABILITATO");
-        data.isDataReady = false;
-        return;
+        // 🔧 FIX: Se ADX dati insufficienti, usa fallback invece di bloccare!
+        data.adx_avg = 25.0;  // ADX neutro come fallback
+        if (g_enableLogsEffective) {
+            Print("[ORGANIC] ADX dati insufficienti - usando fallback: 25.0");
+        }
+    } else {
+        data.adx_avg = adx_sum / adx_count;
     }
-    data.adx_avg = adx_sum / adx_count;
     
     // Calcola deviazione standard
     double variance_sum = 0;
@@ -5218,10 +5441,14 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     }
     data.adx_stddev = MathSqrt(variance_sum / adx_count);
     
+    // 🔧 FIX: Se ADX stddev=0 (mercato flat), NON bloccare - usa fallback!
     if (data.adx_stddev <= 0) {
-        Print("? [ORGANIC] ADX stddev=0 (dati flat) - TF DISABILITATO");
-        data.isDataReady = false;
-        return;
+        // Mercato molto stabile - usa 10% della media come pseudo-stddev
+        data.adx_stddev = data.adx_avg * 0.1;
+        if (data.adx_stddev <= 0) data.adx_stddev = 1.0;  // Fallback assoluto
+        if (g_enableLogsEffective) {
+            PrintFormat("[ORGANIC] ADX stddev=0 (flat) - usando fallback: %.2f", data.adx_stddev);
+        }
     }
     
     // ---------------------------------------------------------------
@@ -5231,10 +5458,18 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     // ---------------------------------------------------------------
     bool empiricalOK = CalculateEmpiricalThresholds(data, lookback);
     
+    // 🔧 FIX: Se soglie empiriche falliscono, NON bloccare - usa valori di default!
     if (!empiricalOK) {
-        Print("[ORGANIC] Calcolo soglie empiriche FALLITO - TF DISABILITATO");
-        data.isDataReady = false;
-        return;
+        // Usa valori neutri come fallback
+        data.rsi_center = 50.0;
+        data.rsi_scale = 20.0;
+        data.stoch_center = 50.0;
+        data.stoch_scale = 20.0;
+        data.adx_p25 = 15.0;
+        data.adx_p75 = 35.0;
+        if (g_enableLogsEffective) {
+            Print("[ORGANIC] Soglie empiriche fallite - usando fallback neutrali");
+        }
     }
     
     // Soglia ADX organica = media + decay(H) * stddev ~ avg + 0.6*stddev
@@ -5538,12 +5773,22 @@ void OnTick()
     CheckAndCloseOnTimeStop();
     
     // ---------------------------------------------------------------
-    // WARMUP: Verifica se il preload storico � andato a buon fine
+    // WARMUP: Verifica se il preload storico è andato a buon fine
     // Il buffer Hurst viene pre-caricato in OnInit() da PreloadHurstBufferFromHistory()
     // Qui controlliamo solo che i flag siano pronti, non aspettiamo tempo reale
+    // 🔧 FIX: Dopo 50 barre, forza warmup completato per evitare blocco
     // ---------------------------------------------------------------
     if (!g_warmupComplete) {
-        // FIX: Se Hurst filter e disabilitato, skip check buffer Hurst
+        // 🔧 FIX: Contatore barre warmup per evitare blocco permanente
+        static int warmupBarCount = 0;
+        static int warmupTickCount = 0;  // Conta anche i tick per timeout assoluto
+        warmupBarCount++;
+        warmupTickCount++;
+        // Protezione overflow: reset se troppo alti
+        if (warmupBarCount > 1000000) warmupBarCount = 51;
+        if (warmupTickCount > 1000000) warmupTickCount = 501;
+        
+        // FIX: Se Hurst filter è disabilitato, skip check buffer Hurst
         bool hurstBufferReady = true;
         bool tradeScoreBufferReady = true;
         bool hurstReadyCheck = true;
@@ -5559,12 +5804,24 @@ void OnTick()
             hurstReadyCheck = g_hurstReady;
         }
         
-        if (hurstBufferReady && tradeScoreBufferReady && hurstReadyCheck) {
+        // 🔧 FIX: Dopo 50 barre O 500 tick, forza completamento warmup
+        bool forceComplete = (warmupBarCount >= 50) || (warmupTickCount >= 500);
+        
+        if ((hurstBufferReady && tradeScoreBufferReady && hurstReadyCheck) || forceComplete) {
             g_warmupComplete = true;
-            if (EnableHurstFilter) {
-                Print("[WARMUP] Buffer pre-caricati dallo storico - EA pronto per il trading");
+            if (forceComplete && !(hurstBufferReady && tradeScoreBufferReady && hurstReadyCheck)) {
+                Print("[WARMUP] 🔧 FORZATO dopo 50 barre - trading permesso con dati parziali");
+                PrintFormat("   Buffer: Hurst=%d/%d TradeScore=%d/%d Ready=%s", 
+                    g_hurstHistorySize, hurstMinRequired,
+                    g_tradeScoreHistorySize, scoreMinRequired,
+                    g_hurstReady ? "Si" : "No");
+                // 🔧 Forza ready per permettere trading
+                g_hurstReady = true;
+                g_hurstAllowTrade = true;
+            } else if (EnableHurstFilter) {
+                Print("[WARMUP] ✅ Buffer pre-caricati dallo storico - EA pronto per il trading");
             } else {
-                Print("[WARMUP] Hurst filter DISABILITATO - EA pronto per il trading (no buffer richiesti)");
+                Print("[WARMUP] ✅ Hurst filter DISABILITATO - EA pronto per il trading (no buffer richiesti)");
             }
         } else {
             // Preload fallito - tenta ricalcolo incrementale
@@ -5580,18 +5837,51 @@ void OnTick()
             // Aggiorna sistema per raccogliere dati incrementalmente
             datetime currentBarTime_warmup = iTime(_Symbol, PERIOD_CURRENT, 0);
             static datetime lastBarTime_warmup = 0;
-            if (currentBarTime_warmup != lastBarTime_warmup) {
+            if (currentBarTime_warmup != lastBarTime_warmup && currentBarTime_warmup > 0) {
                 lastBarTime_warmup = currentBarTime_warmup;
                 RecalculateOrganicSystem();
             }
+            
+            // 🔧 FIX: Log periodico per diagnosticare se EA si è bloccato
+            if (warmupTickCount % 100 == 0) {
+                PrintFormat("[WARMUP ALIVE #%d] EA attivo, warmup in corso... Tick=%d Barre=%d",
+                    warmupTickCount / 100, warmupTickCount, warmupBarCount);
+            }
+            
             return;  // Non proseguire con trading finche buffer non pronti
         }
     }
     
     // Controlla nuovo bar del TF corrente (quello del grafico)
     datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    // 🔧 FIX: Diagnostica se iTime fallisce (ritorna 0)
+    if (currentBarTime == 0) {
+        static int iTimeFailCount = 0;
+        iTimeFailCount++;
+        if (iTimeFailCount <= 5 || iTimeFailCount % 50 == 0) {
+            PrintFormat("[ERROR CRITICO #%d] iTime() ritorna 0 - problema connessione/dati!", iTimeFailCount);
+        }
+        // Prova a continuare comunque dopo 10 fallimenti
+        if (iTimeFailCount > 10) {
+            currentBarTime = TimeCurrent();  // Usa time corrente come fallback
+        } else {
+            return;
+        }
+    }
+    
     if (currentBarTime == lastBarTime) return;
     lastBarTime = currentBarTime;
+    
+    // 🔧 HEARTBEAT: Log periodico per confermare che EA è vivo (anche in backtest)
+    static int totalBarsProcessed = 0;
+    totalBarsProcessed++;
+    // Protezione overflow: reset ogni milione di barre
+    if (totalBarsProcessed > 1000000) totalBarsProcessed = 1;
+    if (totalBarsProcessed == 1 || totalBarsProcessed % 500 == 0) {
+        PrintFormat("[EA HEARTBEAT] Barra #%d processata - %s - EA ATTIVO", 
+            totalBarsProcessed, TimeToString(currentBarTime, TIME_DATE|TIME_MINUTES));
+    }
     
     // ---------------------------------------------------------------
     // ?? OTTIMIZZAZIONE: Ricalcolo ogni N barre (non ogni barra)
@@ -5692,21 +5982,40 @@ void OnTick()
                 barsToLoad);
         }
     } else {
-        // ?? USA CACHE - Aggiorna SOLO l'ultima barra per ogni TF
+        // ⚡ USA CACHE - Aggiorna SOLO l'ultima barra per ogni TF
         m5Loaded = UpdateLastBar(PERIOD_M5, tfData_M5);
         h1Loaded = UpdateLastBar(PERIOD_H1, tfData_H1);
         h4Loaded = UpdateLastBar(PERIOD_H4, tfData_H4);
         d1Loaded = UpdateLastBar(PERIOD_D1, tfData_D1);
         
+        // 🔧 FIX: Se update cache fallisce, forza reload completo per recuperare
+        if (!m5Loaded || !h1Loaded || !h4Loaded || !d1Loaded) {
+            static int cacheFailCount = 0;
+            cacheFailCount++;
+            if (cacheFailCount <= 3 || cacheFailCount % 20 == 0) {
+                PrintFormat("[DATA RECOVER #%d] Cache update fallito - forzo RELOAD completo", cacheFailCount);
+            }
+            // Forza reload completo per ripristinare isDataReady
+            m5Loaded = LoadTimeFrameData(PERIOD_M5, tfData_M5, barsToLoad);
+            h1Loaded = LoadTimeFrameData(PERIOD_H1, tfData_H1, barsToLoad);
+            h4Loaded = LoadTimeFrameData(PERIOD_H4, tfData_H4, barsToLoad);
+            d1Loaded = LoadTimeFrameData(PERIOD_D1, tfData_D1, barsToLoad);
+        }
+        
         if (g_enableLogsEffective) {
-            PrintFormat("[DATA] ? CACHE USATA (%d/%d) | Aggiornata ultima barra",
+            PrintFormat("[DATA] ⚡ CACHE USATA (%d/%d) | Aggiornata ultima barra",
                 g_tfDataRecalcCounter, tfDataReloadInterval);
         }
     }
     
     // M5 � obbligatorio (TF operativo), gli altri sono opzionali
     if (!m5Loaded) {
-        if (g_enableLogsEffective) Print("[ERROR] ? M5 obbligatorio non disponibile - skip");
+        // 🔧 FIX: Log SEMPRE attivo per diagnostica blocchi
+        static int m5FailCount = 0;
+        m5FailCount++;
+        if (m5FailCount <= 5 || m5FailCount % 50 == 0) {
+            PrintFormat("[ERROR CRITICO #%d] M5 obbligatorio non disponibile - EA BLOCCATO!", m5FailCount);
+        }
         return;
     }
     
@@ -5718,7 +6027,13 @@ void OnTick()
     
     // Almeno un TF deve essere attivo
     if (!g_vote_M5_active && !g_vote_H1_active && !g_vote_H4_active && !g_vote_D1_active) {
-        if (g_enableLogsEffective) Print("[ERROR] ?? Nessun TF attivo - skip");
+        // 🔧 FIX: Log SEMPRE attivo per diagnostica blocchi
+        static int noTFCount = 0;
+        noTFCount++;
+        if (noTFCount <= 5 || noTFCount % 50 == 0) {
+            PrintFormat("[ERROR CRITICO #%d] Nessun TF attivo - EA BLOCCATO! Enable: M5=%d H1=%d H4=%d D1=%d",
+                noTFCount, EnableVote_M5, EnableVote_H1, EnableVote_H4, EnableVote_D1);
+        }
         return;
     }
     
@@ -5734,12 +6049,16 @@ void OnTick()
     if (g_vote_D1_active && !tfData_D1.isDataReady) allDataReady = false;
     
     if (!allDataReady) {
-        if (g_enableLogsEffective) {
-            PrintFormat("[ORGANIC] ? Attesa dati: M5=%s H1=%s H4=%s D1=%s",
-                (!g_vote_M5_active || tfData_M5.isDataReady) ? "?" : "?",
-                (!g_vote_H1_active || tfData_H1.isDataReady) ? "?" : "?",
-                (!g_vote_H4_active || tfData_H4.isDataReady) ? "?" : "?",
-                (!g_vote_D1_active || tfData_D1.isDataReady) ? "?" : "?");
+        // 🔧 FIX: Log SEMPRE attivo (anche in backtest) per diagnostica blocchi
+        static int dataNotReadyCount = 0;
+        dataNotReadyCount++;
+        if (dataNotReadyCount <= 5 || dataNotReadyCount % 100 == 0) {
+            PrintFormat("[ORGANIC BLOCK #%d] Dati non pronti: M5=%d H1=%d H4=%d D1=%d (attivo: M5=%d H1=%d H4=%d D1=%d)",
+                dataNotReadyCount,
+                tfData_M5.isDataReady ? 1 : 0, tfData_H1.isDataReady ? 1 : 0,
+                tfData_H4.isDataReady ? 1 : 0, tfData_D1.isDataReady ? 1 : 0,
+                g_vote_M5_active ? 1 : 0, g_vote_H1_active ? 1 : 0,
+                g_vote_H4_active ? 1 : 0, g_vote_D1_active ? 1 : 0);
         }
         return;
     }
@@ -5796,6 +6115,26 @@ void OnTick()
     
     // Logica di trading
     if (g_enableLogsEffective) Print("[TRADE] ?? Avvio logica di trading...");
+    
+    // 🔧 DIAGNOSTICA PERIODICA (sempre attiva, anche in backtest)
+    // Stampa stato completo ogni 100 barre per capire blocchi
+    static int barCount = 0;
+    barCount++;
+    // Protezione overflow
+    if (barCount > 1000000) barCount = 101;
+    if (barCount == 1 || barCount == 10 || barCount == 50 || barCount % 100 == 0) {
+        PrintFormat("[DIAG BAR #%d] TF attivi: M5=%d H1=%d H4=%d D1=%d | DataReady: M5=%d H1=%d H4=%d D1=%d",
+            barCount,
+            g_vote_M5_active ? 1 : 0, g_vote_H1_active ? 1 : 0, 
+            g_vote_H4_active ? 1 : 0, g_vote_D1_active ? 1 : 0,
+            tfData_M5.isDataReady ? 1 : 0, tfData_H1.isDataReady ? 1 : 0,
+            tfData_H4.isDataReady ? 1 : 0, tfData_D1.isDataReady ? 1 : 0);
+        PrintFormat("[DIAG BAR #%d] Hurst: H=%.3f Centro=%.3f Stdev=%.4f | TradeScore=%.4f vs Soglia=%.4f → %s",
+            barCount, g_hurstComposite, g_hurstCenter, g_hurstStdev,
+            g_hurstTradeScore, g_tradeScoreThreshold,
+            g_hurstAllowTrade ? "TRADE PERMESSO" : "TRADE BLOCCATO");
+    }
+    
     ExecuteTradingLogic();
     if (g_enableLogsEffective) {
         Print("[TRADE] ? Elaborazione completata");
@@ -5853,7 +6192,12 @@ void ExecuteTradingLogic()
     int openPositions = CountOpenPositions();
     
     if (MaxOpenTrades > 0 && openPositions >= MaxOpenTrades) {
-        if (g_enableLogsEffective) PrintFormat("[TRADE] ?? Max posizioni raggiunto: %d/%d - skip", openPositions, MaxOpenTrades);
+        // 🔧 FIX: Log SEMPRE quando max posizioni raggiunto
+        static int maxPosBlockCount = 0;
+        maxPosBlockCount++;
+        if (maxPosBlockCount <= 3 || maxPosBlockCount % 20 == 0) {
+            PrintFormat("[TRADE BLOCK MaxPos #%d] Posizioni: %d/%d - skip", maxPosBlockCount, openPositions, MaxOpenTrades);
+        }
         return;
     }
     
@@ -5864,10 +6208,18 @@ void ExecuteTradingLogic()
     // ?? FIX: Log solo se c'era un segnale valido da bloccare
     // ---------------------------------------------------------------
     if (!IsTradeAllowedByHurst()) {
-        // ?? FIX: Log solo se c'� un segnale reale (BUY/SELL) che viene bloccato
-        if (voteResult != 0 && g_enableLogsEffective) {
-            PrintFormat("[HURST] ? TRADE %s BLOCCATO - TradeScore=%.3f < %.3f (soglia)", 
-                voteResult == 1 ? "BUY" : "SELL", g_hurstTradeScore, g_tradeScoreThreshold);
+        // 🔧 FIX: Log SEMPRE quando segnale bloccato (anche in backtest) per diagnostica
+        if (voteResult != 0) {
+            // Log throttle: massimo ogni 10 blocchi per evitare spam
+            static int blockCount = 0;
+            blockCount++;
+            if (blockCount <= 3 || blockCount % 10 == 0) {
+                PrintFormat("[HURST BLOCK #%d] %s bloccato: TradeScore=%.4f < Soglia=%.4f | H=%.3f Centro=%.3f Stdev=%.4f", 
+                    blockCount,
+                    voteResult == 1 ? "BUY" : "SELL", 
+                    g_hurstTradeScore, g_tradeScoreThreshold,
+                    g_hurstComposite, g_hurstCenter, g_hurstStdev);
+            }
         }
         return;
     }
@@ -6579,6 +6931,19 @@ int ExecuteVotingLogic()
             reason = "Direzione neutra";
         }
         PrintFormat("[VOTE] ⏸ NO TRADE | %s", reason);
+    }
+    else {
+        // 🔧 FIX: Log throttled anche in backtest per diagnostica blocchi
+        static int noTradeCount = 0;
+        noTradeCount++;
+        if (noTradeCount == 1 || noTradeCount == 10 || noTradeCount == 50 || noTradeCount % 100 == 0) {
+            string reason = (scorePct < currentThreshold) ? 
+                StringFormat("Score %.1f%% < %.1f%% soglia", scorePct, currentThreshold) : "Direzione neutra";
+            PrintFormat("[VOTE STATS #%d] NO TRADE: %s | TF attivi: M5=%d H1=%d H4=%d D1=%d", 
+                noTradeCount, reason,
+                g_vote_M5_active ? 1 : 0, g_vote_H1_active ? 1 : 0, 
+                g_vote_H4_active ? 1 : 0, g_vote_D1_active ? 1 : 0);
+        }
     }
     
     // 🌱 v1.1: Salva score per Youden (collegare a profitto del trade)
