@@ -26,26 +26,56 @@ cd montecarlo
 pip install -r requirements.txt
 ```
 
-## � Dove Trovare i File dei Trade
+## 📁 Dove trovare i file dei trade (CSV)
 
 ### L'EA esporta automaticamente!
 EA_ORGANIC_Jarvis esporta i trade in CSV alla fine di ogni backtest/sessione.
 
-**Percorso file esportato:**
+**Percorso principale (consigliato):** l'EA usa `FILE_COMMON`, quindi salva qui (accessibile sia da LIVE che dal TESTER):
+
+```
+C:\Users\[TuoUtente]\AppData\Roaming\MetaQuotes\Terminal\Common\Files\
+```
+
+**Fallback:** se per qualche motivo non riesce a scrivere in Common, salva nella cartella del terminale:
+
 ```
 C:\Users\[TuoUtente]\AppData\Roaming\MetaQuotes\Terminal\[ID]\MQL5\Files\
 ```
 
-Il file si chiama: `trades_SIMBOLO_DATA.csv`
+### File legacy (per Monte Carlo)
 
-Esempio: `trades_EURUSD_2024-12-28.csv`
+Il file si chiama:
+
+`trades_<SIMBOLO>_<DATA>_(backtest|live).csv`
+
+Esempi:
+
+- `trades_EURUSD_2024-12-28_backtest.csv`
+- `trades_EURUSD_2024-12-28_live.csv`
 
 ### Come attivare l'export:
 1. Nelle impostazioni EA, assicurati che `ExportTradesCSV = true`
 2. Esegui il backtest
 3. Alla fine, il file viene creato automaticamente
 
-## �📊 Utilizzo
+Nota: il CSV usa `;` come separatore.
+
+### File esteso (opzionale, per diagnostica)
+
+Se abiliti anche `ExportExtendedTradesCSV = true`, l'EA crea un secondo file:
+
+`trades_ext_<SIMBOLO>_<DATA>_(backtest|live).csv`
+
+Contiene un record piu ricco (snapshot all'ingresso + dati di chiusura), utile per:
+
+- verificare soglia base vs soglia effettiva (Soft Hurst / TF coherence)
+- controllare quale metodo soglia era attivo (MANUAL / OTSU / YOUDEN)
+- analisi debug su spread/slippage all'apertura, regimi, ecc.
+
+Lo script Monte Carlo in questa cartella usa il **file legacy** (quello con header compatibile e colonna `Profit`/`NetProfit`).
+
+## 📊 Utilizzo
 
 ### 1. Utilizzo Base (con trade di esempio)
 

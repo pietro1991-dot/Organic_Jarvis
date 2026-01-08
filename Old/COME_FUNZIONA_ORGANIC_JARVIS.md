@@ -1,6 +1,9 @@
 # 🌱 Come Funziona EA Organic Jarvis v1.1
 ## Guida al Sistema 100% Data-Driven basato sull'Esponente di Hurst
 
+> Nota: questa guida nella cartella `Old/` e' una spiegazione concettuale storica.
+> Per le modifiche piu recenti della v1.1 (Soft Hurst / TF coherence / circuit breaker / doppio export CSV con file `trades_ext_...`), fai riferimento a `DOC_ORGANIC_JARVIS_v1.1_ULTRA_DETTAGLIATA.md` nella root.
+
 ---
 
 ## 🎯 IL CUORE DEL SISTEMA: L'Esponente di Hurst (H)

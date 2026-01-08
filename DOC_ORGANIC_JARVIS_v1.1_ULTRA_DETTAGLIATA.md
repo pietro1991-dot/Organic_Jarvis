@@ -67,24 +67,24 @@ L'EA prova a:
 ### 3.0 Schema visivo (panoramica)
 
 ```mermaid
-flowchart TD
-  A[Nuova barra su timeframe del grafico] --> B[UpdateTrailingStops]
-  A --> C[CheckEarlyExitOnReversal + CheckAndCloseOnTimeStop]
-  A --> D{Warmup completato?}
-  D -- no --> E[Su nuova barra: RecalculateOrganicSystem]
-  E --> Z[Return: no trading]
-  D -- si --> F[Load/Update dati M5/H1/H4/D1 (cache o reload)]
-  F --> G{Dati pronti su TF attivi?}
-  G -- no --> Z
-  G -- si --> H[ExecuteTradingLogic]
-  H --> I[ExecuteVotingLogic: totalScore]
-  I --> J[scorePct + soglia (manuale/auto)]
-  J --> K{Filtro Hurst: trade permesso?}
-  K -- no --> Z
-  K -- si --> L{Segnale BUY/SELL?}
-  L -- BUY --> M[OpenBuyOrder]
-  L -- SELL --> N[OpenSellOrder]
-  L -- NO --> Z
+graph TD
+  A1["Nuova barra (timeframe del grafico)"] --> B1["UpdateTrailingStops"]
+  A1 --> C1["CheckEarlyExitOnReversal & TimeStop"]
+  A1 --> D1{"Warmup completato?"}
+  D1 -- "no" --> E1["Su nuova barra: RecalculateOrganicSystem"]
+  E1 --> Z1["Return (no trading)"]
+  D1 -- "si" --> F1["Load/Update dati M5/H1/H4/D1"]
+  F1 --> G1{"Dati pronti su TF attivi?"}
+  G1 -- "no" --> Z1
+  G1 -- "si" --> H1["ExecuteTradingLogic"]
+  H1 --> I1["ExecuteVotingLogic (totalScore)"]
+  I1 --> J1["scorePct + soglia (manuale/auto)"]
+  J1 --> K1{"Filtri OK? (Hurst/TF coherence/circuit breaker)"}
+  K1 -- "no" --> Z1
+  K1 -- "si" --> L1{"Segnale BUY/SELL?"}
+  L1 -- "BUY" --> M1["OpenBuyOrder"]
+  L1 -- "SELL" --> N1["OpenSellOrder"]
+  L1 -- "NO" --> Z1
 ```
 
 ### Livello A: dati e indicatori (per ogni TF)
@@ -108,7 +108,11 @@ Risultato: `totalScore` (positivo o negativo).
 
 - Trasforma `totalScore` in `scorePct` (forza %).
 - Confronta `scorePct` con una soglia (manuale o auto).
-- Applica filtro Hurst: se il regime e' "random" blocca nuovi trade.
+- Applica filtri:
+  - Hurst in **hard mode** puo' bloccare nuovi trade in no-trade zone;
+  - Hurst in **soft mode (Option 1)** non blocca ma aumenta la soglia effettiva;
+  - TF coherence (opzionale) puo' essere penalty (soft) o hard-block;
+  - circuit breaker (opzionale) blocca solo i nuovi ingressi.
 - Se entra:
   - apre BUY o SELL con SL/TP (prezzo fisso o points).
 - Se e' in trade:
@@ -143,13 +147,21 @@ $$
 
 ### 3.1.3 Regola base di decisione
 
-Sia $T$ la soglia corrente (manuale o automatica). Allora:
+Sia $T_{base}$ la soglia corrente (manuale o automatica: warmup/otsu/youden).
+
+Nella v1.1 aggiornata, l'EA puo' applicare filtri **soft** (es. Soft Hurst / TF coherence) che non bloccano direttamente ma aumentano la soglia, ottenendo una soglia effettiva $T_{eff}$:
+
+$$
+T_{eff} = \min\left(100,\ T_{base}\cdot m_{hurst}\cdot m_{tf}\right)
+$$
+
+Allora la regola di decisione diventa:
 
 $$
 decision =
 \begin{cases}
-BUY & \text{se } totalScore > 0 \text{ e } scorePct \ge T \\
-SELL & \text{se } totalScore < 0 \text{ e } scorePct \ge T \\
+BUY & \text{se } totalScore > 0 \text{ e } scorePct \ge T_{eff} \\
+SELL & \text{se } totalScore < 0 \text{ e } scorePct \ge T_{eff} \\
 NO\ TRADE & \text{altrimenti}
 \end{cases}
 $$
@@ -222,12 +234,29 @@ L'EA la usa per:
 - salvare il trade in un buffer dei trade recenti,
 - collegare `Score@Entry` al risultato (utile per soglia tipo Youden).
 
+Nota (v1.1 aggiornato): se e' attivo l'**export esteso** (`ExportExtendedTradesCSV=true`), l'EA registra anche un **entry snapshot** al momento dell'apertura (score%, soglie, Hurst/TF coherence, spread/slippage, regime). Alla chiusura, `OnTradeTransaction()` recupera lo snapshot e crea un record esteso.
+
+Gestione partial close (importante): lo snapshot resta associato alla **POSITION_IDENTIFIER** finche' la posizione non e' davvero chiusa. In caso di chiusure parziali (piu deal di uscita sullo stesso identifier), l'EA evita di “consumare” lo snapshot troppo presto.
+
 ### 4.4 OnDeinit(): pulizia ed export
 
 Quando l'EA viene rimosso o finisce un backtest:
 
 - pulisce risorse,
 - se abilitato, esporta i trade in CSV.
+
+In v1.1 ci sono **due export** separati:
+
+- **Export legacy (Monte Carlo)**: `ExportTradesCSV=true` -> crea `trades_<symbol>_<date>_(backtest|live).csv` con colonne compatibili con lo script Python.
+- **Export esteso (debug/diagnostica)**: `ExportExtendedTradesCSV=true` -> crea `trades_ext_<symbol>_<date>_(backtest|live).csv` con snapshot di ingresso + dati di chiusura.
+
+Percorso: l'EA prova a scrivere in `FILE_COMMON` (cartella Common di MT5, accessibile sia in live che nel tester). Se non riesce, fa fallback su `MQL5\Files` del terminale.
+
+Nel CSV esteso trovi (oltre ai campi classici) colonne specifiche per capire *perche'* un trade e' entrato/uscito, ad esempio:
+
+- `ScorePctAtEntry`, `ThresholdBasePct`, `ThresholdEffPct`, `ThresholdMethodId/ThresholdMethod`
+- `HurstSoftMult`, `HurstTradeScore`, `HurstTradeThreshold`, `HurstReady`, `HurstAllowTrade`
+- `TFCoherenceMult`, `TFCoherenceConflicts/Supports`, `TFCoherenceBlocked`
 
 ---
 
@@ -316,7 +345,7 @@ Nel codice v1.1 la scala organica $scale(H)$ (e il suo duale $decay(H)$) viene u
 
 - **Numero barre da caricare**: $barsToLoad \approx maxPeriodNeeded \cdot scale(H)$ (poi con minimi/limiti di sicurezza).
 - **Mean-reversion weights**: nella combinazione, RSI pesa con $scale(H)$; Stoch pesa con $decay(H)$.
-- **Soglia ridotta per entry anticipato**: $reversalThreshold = T \cdot decay(H)$.
+- **Soglia ridotta per entry anticipato**: $reversalThreshold = T_{eff} \cdot decay(H)$ (dove $T_{eff}$ include eventuali penalita' Soft Hurst / TF coherence).
 - **Zona random Hurst**: margine proporzionale a $stdev(H)\cdot decay(H)$.
 
 Idea semplice: $scale(H)$ tende ad "allargare" quando il regime e' piu persistente, mentre $decay(H)$ tende a "smorzare" (ridurre peso/soglia) in modo controllato.
@@ -407,9 +436,9 @@ Quando il mercato e' molto "rumoroso", tanti indicatori danno segnali casuali.
 
 L'EA usa Hurst per dire:
 
-- se H e' vicino al suo centro storico (zona random), allora:
-  - **blocca nuovi trade**,
-  - ma continua a gestire le posizioni gia aperte.
+- se H e' vicino al suo centro storico (zona random), il mercato e' spesso "noise":
+  - in **modalita' hard** puo' bloccare i nuovi ingressi,
+  - in **modalita' soft (Option 1)** non blocca, ma rende l'ingresso piu difficile aumentando la soglia effettiva.
 
 ### 8.2 Come decide se bloccare
 
@@ -419,10 +448,10 @@ In pratica usa:
 - una deviazione standard `g_hurstStdev`,
 - una soglia (tradeScoreThreshold) e un tradeScore che misura quanto H si discosta.
 
-Output logico:
+Output logico (in base alla configurazione):
 
-- `IsTradeAllowedByHurst()` = true -> puoi aprire nuovi trade
-- false -> i nuovi trade vengono bloccati.
+- **Hard gate** (storico): `IsTradeAllowedByHurst()` decide se puoi aprire nuovi trade.
+- **Soft gate (Option 1)**: `IsTradeAllowedByHurst()` non hard-blocca; invece viene calcolato un moltiplicatore `HurstSoftMult >= 1` che aumenta la soglia di ingresso.
 
 Formule (concetto, coerente con variabili globali come `g_hurstCenter`, `g_hurstStdev`, `g_hurstRandomLow`, `g_hurstRandomHigh`):
 
@@ -528,10 +557,21 @@ $$
 allowTrade = (tradeScore \ge threshold)
 $$
 
-Interpretazione operativa:
+Interpretazione operativa (hard gate):
 
 - se sei troppo vicino a center, deviation e tradeScore sono bassi -> spesso **non** superi la soglia -> **no-trade zone**
 - se H si stacca in modo convincente dal centro -> tradeScore sale -> supera la soglia -> **trade permesso**
+
+Interpretazione operativa (soft gate - Option 1):
+
+- se `tradeScore` e' sotto soglia, invece di bloccare, l'EA applica una penalita' che aumenta la soglia effettiva:
+
+$$
+T_{eff} = \min\left(100,\ T_{base}\cdot HurstSoftMult\right)
+$$
+
+- `HurstSoftMult` cresce al crescere del "deficit" (quanto `tradeScore` e' sotto `threshold`) fino a un massimo (`HurstSoftMaxPenaltyPct`).
+- se `tradeScore \ge threshold` (oppure Hurst non e' pronto), allora `HurstSoftMult = 1` (nessuna penalita').
 
 Paragrafo chiave (no-trade zone, detta semplice):
 
@@ -541,6 +581,20 @@ La no-trade zone in v1.1 e' la situazione in cui **lo stacco di H dal suo centro
 
 Se `EnableHurstFilter=false`, il filtro Hurst non viene usato come gate.
 In pratica l'EA non blocca nuovi trade per no-trade zone (anche se H e' in regime random).
+
+Inoltre, in questa configurazione la soglia effettiva non riceve penalita' da Hurst (equivalente a `HurstSoftMult = 1`).
+
+### 8.5 Interazione con "entry anticipato" e altre penalita'
+
+Quando l'EA usa soglie dinamiche o filtri soft (Soft Hurst e/o TF coherence), la regola pratica e':
+
+- la soglia base $T_{base}$ e' quella manuale o automatica (Otsu/Youden),
+- la soglia effettiva $T_{eff}$ include penalita' (moltiplicatori >= 1),
+- l'entry anticipato usa la soglia ridotta calcolata dalla soglia effettiva:
+
+$$
+reversalThreshold = T_{eff} \cdot decay(H)
+$$
 
 Schema visivo (asse H):
 
@@ -740,10 +794,21 @@ L'EA produce una decisione:
 - `decision = -1` -> SELL
 - `decision = 0` -> NO TRADE
 
-Regole base:
+Regole base (soglia base vs soglia effettiva):
 
-1. Se `totalScore > 0` e `scorePct >= soglia` -> BUY
-2. Se `totalScore < 0` e `scorePct >= soglia` -> SELL
+1. Calcola una soglia base $T_{base}$ (manuale o automatica: warmup/otsu/youden).
+2. Calcola una soglia effettiva $T_{eff}$ applicando eventuali filtri **soft** (moltiplicatori che rendono l'ingresso piu difficile):
+
+$$
+T_{eff} = \min\left(100,\ T_{base}\cdot m_{hurst}\cdot m_{tf}\right)
+$$
+
+dove tipicamente $m_{hurst} = HurstSoftMult \ge 1$ e $m_{tf}\ge 1$ dipende dal filtro TF coherence.
+
+3. Decisione:
+
+- Se `totalScore > 0` e `scorePct >= T_eff` -> BUY
+- Se `totalScore < 0` e `scorePct >= T_eff` -> SELL
 
 Regola extra (entry anticipato):
 
@@ -757,12 +822,14 @@ allora entra lo stesso (reversalBoost).
 Formula della soglia ridotta:
 
 $$
-reversalThreshold = T \cdot decay(H)
+reversalThreshold = T_{eff} \cdot decay(H)
 $$
 
 Dove $T$ e' la soglia corrente (manuale o automatica).
 
-Nota: anche dopo la decisione, `ExecuteTradingLogic()` applica ulteriori filtri (permessi trading, spread, max posizioni, filtro Hurst).
+Nota: anche dopo la decisione, `ExecuteTradingLogic()` applica ulteriori filtri (permessi trading, spread, max posizioni, filtro Hurst hard se attivo, filtro TF coherence se configurato hard-block, e circuit breaker). Questi filtri possono bloccare l'apertura pur avendo una decisione BUY/SELL.
+
+Logging (v1.1 aggiornato): ogni tentativo di ingresso produce una riga compatta `[DECISION]` con score, soglie (base/effettiva), moltiplicatori (Soft Hurst/TF coherence), e l'eventuale motivo di blocco (spread, max posizioni, permessi, circuit breaker, ecc.).
 
 ---
 
@@ -891,8 +958,18 @@ $$
 Soglia ridotta per entry anticipato:
 
 $$
-reversalThreshold = T \cdot decay(H)
+reversalThreshold = T_{eff} \cdot decay(H)
 $$
+
+### B.1) Soglia effettiva (soft gating)
+
+Quando alcuni filtri non vogliono hard-bloccare ma solo rendere l'ingresso piu selettivo, l'EA usa una soglia effettiva:
+
+$$
+T_{eff} = \min\left(100,\ T_{base}\cdot m_{hurst}\cdot m_{tf}\right)
+$$
+
+con $m_{hurst}\ge 1$ (Soft Hurst) e $m_{tf}\ge 1$ (TF coherence in modalita' penalty). Se un filtro e' disattivo o non applicabile, il suo moltiplicatore vale 1.
 
 ### C) Zona random Hurst (no-trade zone)
 
@@ -941,6 +1018,8 @@ $$
 $$
 allowTrade = (tradeScore \ge threshold)
 $$
+
+Nota: in **hard mode** `allowTrade=false` blocca direttamente nuovi ingressi. In **soft mode (Option 1)** `allowTrade` viene comunque calcolato e loggato, ma l'ingresso non viene bloccato: la differenza si riflette nel moltiplicatore `HurstSoftMult` e quindi in $T_{eff}$.
 
 ### D) Mean-reversion combinato (alto livello)
 
