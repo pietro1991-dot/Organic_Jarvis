@@ -149,6 +149,7 @@ input bool   EnableVote_D1             = true;  // Usa timeframe D1 nel voto
 input group "--- LOG ---"
 input bool   EnableLogs                = true;  // Abilita TUTTI i log (true=completi, false=silenzioso)
 input bool   ExportTradesCSV           = true;  // Esporta trade in CSV per Monte Carlo
+input bool   ExportExtendedTradesCSV   = true;  // Esporta CSV esteso con contesto (score/soglie/Hurst/spread/slippage/closeReason)
 
 // +---------------------------------------------------------------------------+
 //                           CIRCUIT BREAKER
@@ -282,6 +283,13 @@ input bool   enableOBV       = true;    // OBV: divergenze volume/prezzo -> voto
 // +---------------------------------------------------------------------------+
 input group "--- SISTEMA ORGANICO ---"
 input bool   EnableHurstFilter  = true;         // Abilita filtro no-trade zone (H in zona random)
+input bool   EnableHurstSoftMode = true;        // Se true: NON blocca hard le entry, ma alza la soglia richiesta quando TradeScore Hurst e' debole
+input double HurstSoftMaxPenaltyPct = 50.0;     // Max penalita' soglia in modalita' soft (es: 50 = soglia * 1.50 nel worst case)
+input int    HurstSoftSummaryEveryBars = 100;   // Log riepilogo soft Hurst ogni N barre (0=off). Non sostituisce i log DECISION.
+
+input bool   EnableTFCoherenceFilter = false;    // Se true: valida coerenza regime Hurst tra TF (evita conflitti M5 vs H4/D1)
+input bool   TFCoherenceHardBlock = false;       // Se true: blocca entry se conflitto forte; se false: penalizza soglia (soft)
+input double TFCoherencePenaltyPct = 30.0;       // Penalita' max (soft): aumenta soglia effettiva in caso di conflitto (es: 30 = x1.30)
 input bool   AutoScoreThreshold = true;         // Soglia automatica (true) o manuale (false)
 input double ScoreThreshold     = 50.0;         // Soglia manuale (50% = mediana) - solo se Auto=false
 
@@ -419,6 +427,105 @@ int    g_barsSinceLastRecalc = 0;           // Contatore barre dall'ultimo rical
 bool   g_isBacktest = false;                 // Flag: siamo in backtest?
 bool   g_enableLogsEffective = true;         // Log effettivi (auto-disabilitati in backtest)
 
+// ---------------------------------------------------------------------------
+//  DIAGNOSTICA SOFT HURST (OPTION 1)
+//  Usata per log chiari in ExecuteTradingLogic(). Aggiornata in ExecuteVotingLogic().
+// ---------------------------------------------------------------------------
+double g_lastHurstSoftMult = 1.0;
+double g_lastThresholdBasePct = 0.0;
+double g_lastThresholdEffPct = 0.0;
+double g_lastScorePct = 0.0;
+bool   g_lastHurstSoftActive = false;
+bool   g_lastHurstSoftSuppressed = false;
+int    g_lastDominantDirection = 0; // +1 BUY, -1 SELL, 0 NEUTRO (utile per log quando soft-hurst sopprime un'entry)
+
+// Coerenza multi-timeframe (regimi Hurst): diagnostica ultimo giro
+double g_lastTFCoherenceMult = 1.0;
+bool   g_lastTFCoherenceActive = false;
+bool   g_lastTFCoherenceBlocked = false;
+int    g_lastTFCoherenceConflictCount = 0;
+int    g_lastTFCoherenceSupportCount = 0;
+
+// Stato corrente del regime Hurst (aggiornato periodicamente)
+enum ENUM_HURST_REGIME {
+    HURST_TRENDING = 1,      // H > zona random: trend persistence
+    HURST_RANDOM = 0,        // dentro zona random: random walk
+    HURST_MEANREV = -1       // H < zona random: mean reversion
+};
+
+ENUM_HURST_REGIME g_hurstRegime_M5 = HURST_RANDOM;
+ENUM_HURST_REGIME g_hurstRegime_H1 = HURST_RANDOM;
+ENUM_HURST_REGIME g_hurstRegime_H4 = HURST_RANDOM;
+ENUM_HURST_REGIME g_hurstRegime_D1 = HURST_RANDOM;
+
+int RegimeToInt(ENUM_HURST_REGIME r)
+{
+    if (r == HURST_TRENDING) return 1;
+    if (r == HURST_MEANREV) return -1;
+    return 0;
+}
+
+bool IsRegimeOpposite(ENUM_HURST_REGIME a, ENUM_HURST_REGIME b)
+{
+    int ia = RegimeToInt(a);
+    int ib = RegimeToInt(b);
+    return (ia != 0 && ib != 0 && ia == -ib);
+}
+
+// Ritorna true se entry consentita dalla coerenza, e fornisce un moltiplicatore soglia (>=1)
+bool GetTFCoherenceDecision(int decisionDir, double &outMult, int &outConflicts, int &outSupports)
+{
+    outMult = 1.0;
+    outConflicts = 0;
+    outSupports = 0;
+
+    if (!EnableTFCoherenceFilter) return true;
+    if (decisionDir == 0) return true;
+
+    // Coerenza = i TF maggiori non devono essere in regime opposto a quelli minori.
+    // Semplificazione robusta: controlliamo coppie (M5 vs H4/D1) e (H1 vs H4/D1) se attivi.
+    bool haveM5 = g_vote_M5_active;
+    bool haveH1 = g_vote_H1_active;
+    bool haveH4 = g_vote_H4_active;
+    bool haveD1 = g_vote_D1_active;
+
+    if (haveM5 && haveH4) {
+        if (IsRegimeOpposite(g_hurstRegime_M5, g_hurstRegime_H4)) outConflicts++; else outSupports++;
+    }
+    if (haveM5 && haveD1) {
+        if (IsRegimeOpposite(g_hurstRegime_M5, g_hurstRegime_D1)) outConflicts++; else outSupports++;
+    }
+    if (haveH1 && haveH4) {
+        if (IsRegimeOpposite(g_hurstRegime_H1, g_hurstRegime_H4)) outConflicts++; else outSupports++;
+    }
+    if (haveH1 && haveD1) {
+        if (IsRegimeOpposite(g_hurstRegime_H1, g_hurstRegime_D1)) outConflicts++; else outSupports++;
+    }
+
+    // Se abbiamo pochi TF attivi, la coerenza ha poco senso
+    if ((outConflicts + outSupports) == 0) return true;
+
+    // Score conflitto in [0..1]
+    double conflictRatio = (double)outConflicts / (double)(outConflicts + outSupports);
+
+    if (TFCoherenceHardBlock) {
+        // Blocca solo se conflitto pieno (tutte le coppie considerate sono opposte)
+        // -> evita blocchi "a sorpresa" quando c'e' solo un TF random.
+        if (outConflicts > 0 && outSupports == 0) {
+            return false;
+        }
+        return true;
+    }
+
+    // Soft: penalizza soglia in modo proporzionale al conflitto
+    double maxPenaltyPct = MathMax(0.0, TFCoherencePenaltyPct);
+    if (maxPenaltyPct > 300.0) maxPenaltyPct = 300.0;
+    double maxMult = 1.0 + (maxPenaltyPct / 100.0);
+    outMult = 1.0 + conflictRatio * (maxMult - 1.0);
+    if (outMult < 1.0) outMult = 1.0;
+    return true;
+}
+
 //  PERIODI EMPIRICI CALCOLATI DAI DATI (usati dopo OnInit)
 int    g_empiricalPeriod_M5 = 0;             // Periodo naturale M5 (da autocorrelazione)
 int    g_empiricalPeriod_H1 = 0;             // Periodo naturale H1 (da autocorrelazione)
@@ -529,6 +636,261 @@ void CB_Init()
             MathMax(1, PerfLookbackTrades), PerfMaxConsecutiveLosses, PerfMinWinRatePct, PerfCooldownSeconds);
     }
 }
+
+// ---------------------------------------------------------------------------
+// EXPORT ESTESO (non superficiale)
+// NOTE: Definizioni posizionate PRIMA degli helper per compatibilita' compilatore.
+// ---------------------------------------------------------------------------
+struct EntrySnapshot {
+    ulong   positionId;
+    datetime openTime;
+    int     direction;            // +1 BUY, -1 SELL
+    double  volume;
+    double  requestedPrice;
+    double  executedPrice;
+    double  sl;
+    double  tp;
+    double  spreadPtsAtOpen;
+    double  slippagePtsAtOpen;
+
+    double  scorePctAtEntry;
+    double  thresholdBasePct;
+    double  thresholdEffPct;
+    int     thresholdMethodId;    // 0=MANUAL, 1=AUTO_WARMUP, 2=OTSU, 3=YOUDEN
+    double  hurstSoftMult;
+    double  tfCoherenceMult;
+    int     tfCoherenceConflicts;
+    int     tfCoherenceSupports;
+    int     tfCoherenceBlocked;   // 1/0
+
+    double  hurstTradeScore;
+    double  hurstTradeThreshold;
+    int     hurstReady;           // 1/0
+    int     hurstAllowTrade;      // 1/0
+    double  hurstGlobal;
+    double  hurstComposite;
+    double  hurstCenter;
+    double  hurstStdev;
+    int     regimeM5;
+    int     regimeH1;
+    int     regimeH4;
+    int     regimeD1;
+};
+
+struct ExtendedTradeRecord {
+    ulong   positionId;
+    datetime openTime;
+    datetime closeTime;
+    int     direction;            // +1 BUY, -1 SELL
+    string  symbol;
+    double  volume;
+    double  requestedOpenPrice;
+    double  executedOpenPrice;
+    double  openPrice;
+    double  closePrice;
+    double  commission;
+    double  swap;
+    double  profit;
+    double  netProfit;
+    double  balanceAfter;
+    int     durationMinutes;
+    long    magic;
+    string  comment;
+    string  closeReason;
+
+    // Entry context
+    double  spreadPtsAtOpen;
+    double  slippagePtsAtOpen;
+    double  sl;
+    double  tp;
+
+    double  scorePctAtEntry;
+    double  thresholdBasePct;
+    double  thresholdEffPct;
+    int     thresholdMethodId;
+    double  hurstSoftMult;
+    double  tfCoherenceMult;
+    int     tfCoherenceConflicts;
+    int     tfCoherenceSupports;
+    int     tfCoherenceBlocked;
+
+    double  hurstTradeScore;
+    double  hurstTradeThreshold;
+    int     hurstReady;
+    int     hurstAllowTrade;
+    double  hurstGlobal;
+    double  hurstComposite;
+    double  hurstCenter;
+    double  hurstStdev;
+    int     regimeM5;
+    int     regimeH1;
+    int     regimeH4;
+    int     regimeD1;
+};
+
+EntrySnapshot g_openEntrySnaps[];
+int g_openEntrySnapsCount = 0;
+int g_openEntrySnapsCap = 0;
+
+ExtendedTradeRecord g_extendedTrades[];
+int g_extendedTradesCount = 0;
+int g_extendedTradesCap = 0;
+
+double g_extExportStartBalance = 0.0;  // calcolato in export come in ExportTradesToCSV
+double g_extExportRunningBalance = 0.0;
+
+//+------------------------------------------------------------------+
+//| EXPORT ESTESO: helpers snapshot / buffer                        |
+//+------------------------------------------------------------------+
+bool NearlyEqual(double a, double b, double eps)
+{
+    return (MathAbs(a - b) <= eps);
+}
+
+bool IsDuplicateExtendedTrade(const ExtendedTradeRecord &rec)
+{
+    // Safety: scan solo una finestra recente (duplicati tipicamente adiacenti)
+    int n = g_extendedTradesCount;
+    int start = MathMax(0, n - 200);
+    for (int i = n - 1; i >= start; i--) {
+        if (g_extendedTrades[i].positionId != rec.positionId) continue;
+        if (g_extendedTrades[i].closeTime != rec.closeTime) continue;
+
+        // Confronti con tolleranza per evitare issue float
+        if (!NearlyEqual(g_extendedTrades[i].netProfit, rec.netProfit, 0.0001)) continue;
+        if (!NearlyEqual(g_extendedTrades[i].volume, rec.volume, 0.0000001)) continue;
+        if (!NearlyEqual(g_extendedTrades[i].closePrice, rec.closePrice, _Point * 0.5)) continue;
+
+        return true;
+    }
+    return false;
+}
+
+bool IsPositionOpenById(ulong positionId)
+{
+    if (positionId == 0) return false;
+    int total = PositionsTotal();
+    for (int i = total - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+        if (!PositionSelectByTicket(ticket)) continue;
+        long ident = PositionGetInteger(POSITION_IDENTIFIER);
+        if (ident > 0 && (ulong)ident == positionId) return true;
+    }
+    return false;
+}
+
+int FindOpenEntrySnapIndex(ulong positionId)
+{
+    int n = g_openEntrySnapsCount;
+    for (int i = 0; i < n; i++) {
+        if (g_openEntrySnaps[i].positionId == positionId) return i;
+    }
+    return -1;
+}
+
+bool GetEntrySnapshot(ulong positionId, EntrySnapshot &outSnap)
+{
+    int idx = FindOpenEntrySnapIndex(positionId);
+    if (idx < 0) return false;
+    outSnap = g_openEntrySnaps[idx];
+    return true;
+}
+
+void EnsureOpenEntrySnapsCapacity(int minCap)
+{
+    if (g_openEntrySnapsCap >= minCap) return;
+    int newCap = (g_openEntrySnapsCap <= 0) ? 16 : g_openEntrySnapsCap;
+    while (newCap < minCap) newCap *= 2;
+    ArrayResize(g_openEntrySnaps, newCap);
+    g_openEntrySnapsCap = newCap;
+}
+
+void RegisterEntrySnapshot(const EntrySnapshot &snap)
+{
+    if (snap.positionId == 0) return;
+
+    // Safety: in teoria le posizioni aperte simultanee sono limitate, ma evitiamo crescita anomala
+    const int OPEN_SNAP_MAX = 5000;
+    if (g_openEntrySnapsCount >= OPEN_SNAP_MAX) {
+        static bool s_loggedSnapMax = false;
+        if (!s_loggedSnapMax) {
+            PrintFormat("[EXPORT-EXT] Troppi snapshot aperti (%d). Stop register per safety.", OPEN_SNAP_MAX);
+            s_loggedSnapMax = true;
+        }
+        return;
+    }
+
+    int idx = FindOpenEntrySnapIndex(snap.positionId);
+    if (idx >= 0) {
+        g_openEntrySnaps[idx] = snap;
+        return;
+    }
+    EnsureOpenEntrySnapsCapacity(g_openEntrySnapsCount + 1);
+    g_openEntrySnaps[g_openEntrySnapsCount] = snap;
+    g_openEntrySnapsCount++;
+}
+
+bool GetAndRemoveEntrySnapshot(ulong positionId, EntrySnapshot &outSnap)
+{
+    int idx = FindOpenEntrySnapIndex(positionId);
+    if (idx < 0) return false;
+    outSnap = g_openEntrySnaps[idx];
+    // remove by swap-last
+    int last = g_openEntrySnapsCount - 1;
+    if (last >= 0 && idx != last) {
+        g_openEntrySnaps[idx] = g_openEntrySnaps[last];
+    }
+    g_openEntrySnapsCount = MathMax(0, g_openEntrySnapsCount - 1);
+    // non ridimensioniamo array per evitare churn
+    return true;
+}
+
+void EnsureExtendedTradesCapacity(int minCap)
+{
+    if (g_extendedTradesCap >= minCap) return;
+    int newCap = (g_extendedTradesCap <= 0) ? 256 : g_extendedTradesCap;
+    while (newCap < minCap) newCap *= 2;
+    ArrayResize(g_extendedTrades, newCap);
+    g_extendedTradesCap = newCap;
+}
+
+void AppendExtendedTrade(const ExtendedTradeRecord &rec)
+{
+    // Anti-duplicati: evita doppie righe identiche (es. eventi ripetuti)
+    if (IsDuplicateExtendedTrade(rec)) {
+        static int s_dupLogCount = 0;
+        if (EnableLogs && s_dupLogCount < 5) {
+            PrintFormat("[EXPORT-EXT] Duplicate suppressed #%I64u @ %s",
+                rec.positionId, TimeToString(rec.closeTime, TIME_DATE|TIME_MINUTES|TIME_SECONDS));
+            s_dupLogCount++;
+        }
+        return;
+    }
+
+    // Safety: evita crescita memoria illimitata in run lunghi/rumorosi
+    const int EXTENDED_EXPORT_MAX_RECORDS = 200000;
+    if (g_extendedTradesCount >= EXTENDED_EXPORT_MAX_RECORDS) {
+        static bool s_loggedMax = false;
+        if (!s_loggedMax) {
+            PrintFormat("[EXPORT-EXT] Buffer pieno (%d record). Stop append per safety.", EXTENDED_EXPORT_MAX_RECORDS);
+            s_loggedMax = true;
+        }
+        return;
+    }
+
+    EnsureExtendedTradesCapacity(g_extendedTradesCount + 1);
+    g_extendedTrades[g_extendedTradesCount] = rec;
+    g_extendedTradesCount++;
+}
+
+string RegimeToStringInt(int r)
+{
+    if (r > 0) return "TREND";
+    if (r < 0) return "REVERT";
+    return "RANDOM";
+}
+
 
 void CB_GetOperationalSnapshot(datetime now, int &errorsInWindow, int &windowSec, int &remainingSec)
 {
@@ -1069,6 +1431,159 @@ int g_recentTradesCount = 0;
 int g_recentTradesIndex = 0;
 
 // ---------------------------------------------------------------------------
+// EXPORT ESTESO (non superficiale)
+// (Struct + buffer dichiarati sopra, prima degli helper, per compatibilita')
+// ---------------------------------------------------------------------------
+
+string ThresholdMethodToString(int id)
+{
+    switch (id) {
+        case 0:  return "MANUAL";
+        case 1:  return "AUTO_WARMUP";
+        case 2:  return "OTSU";
+        case 3:  return "YOUDEN";
+        default: return "UNKNOWN";
+    }
+}
+
+void ExportExtendedTradesToCSV()
+{
+    if (!ExportExtendedTradesCSV) return;
+
+    if (g_extendedTradesCount <= 0) {
+        Print("[EXPORT-EXT] Nessun trade esteso da esportare (buffer vuoto)");
+        return;
+    }
+
+    bool isTester = MQLInfoInteger(MQL_TESTER) != 0;
+
+    // ---------------------------------------------------------------
+    // GENERA NOME FILE
+    // ---------------------------------------------------------------
+    string symbolClean = _Symbol;
+    StringReplace(symbolClean, "/", "");
+    StringReplace(symbolClean, "\\", "");
+    StringReplace(symbolClean, ".", "");
+    StringReplace(symbolClean, "#", "");
+
+    string dateStr = TimeToString(TimeCurrent(), TIME_DATE);
+    StringReplace(dateStr, ".", "-");
+
+    string suffix = isTester ? "_backtest" : "_live";
+    string filename = StringFormat("trades_ext_%s_%s%s.csv", symbolClean, dateStr, suffix);
+
+    // ---------------------------------------------------------------
+    // APRI FILE (FILE_COMMON come ExportTradesToCSV)
+    // ---------------------------------------------------------------
+    bool wroteToCommon = true;
+    int fileHandle = FileOpen(filename, FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ';');
+    if (fileHandle == INVALID_HANDLE) {
+        wroteToCommon = false;
+        fileHandle = FileOpen(filename, FILE_WRITE|FILE_CSV|FILE_ANSI, ';');
+        if (fileHandle == INVALID_HANDLE) {
+            PrintFormat("[EXPORT-EXT] Impossibile creare file: %s (Errore: %d)", filename, GetLastError());
+            return;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // HEADER
+    // ---------------------------------------------------------------
+    FileWrite(fileHandle,
+        "PositionId","OpenTime","CloseTime","Direction","Symbol","Volume",
+        "RequestedOpenPrice","ExecutedOpenPrice","ClosePrice",
+        "Commission","Swap","Profit","NetProfit","BalanceAfter","Duration_Minutes","MagicNumber",
+        "Comment","CloseReason",
+        "SpreadPtsAtOpen","SlippagePtsAtOpen","SL","TP",
+        "ScorePctAtEntry","ThresholdBasePct","ThresholdEffPct","HurstSoftMult",
+        "ThresholdMethodId","ThresholdMethod",
+        "TFCoherenceMult","TFCoherenceConflicts","TFCoherenceSupports","TFCoherenceBlocked",
+        "HurstTradeScore","HurstTradeThreshold","HurstReady","HurstAllowTrade",
+        "HurstGlobal","HurstComposite","HurstCenter","HurstStdev",
+        "RegimeM5","RegimeM5Text","RegimeH1","RegimeH1Text","RegimeH4","RegimeH4Text","RegimeD1","RegimeD1Text");
+
+    int symbolDigits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    int exported = 0;
+
+    for (int i = 0; i < g_extendedTradesCount; i++) {
+        ExtendedTradeRecord rec = g_extendedTrades[i];
+
+        string dirStr = (rec.direction > 0) ? "Buy" : "Sell";
+
+        // sanitize comment
+        string c = rec.comment;
+        StringReplace(c, ";", ",");
+        StringReplace(c, "\n", " ");
+        StringReplace(c, "\r", " ");
+
+        FileWrite(fileHandle,
+            (ulong)rec.positionId,
+            TimeToString(rec.openTime, TIME_DATE|TIME_MINUTES|TIME_SECONDS),
+            TimeToString(rec.closeTime, TIME_DATE|TIME_MINUTES|TIME_SECONDS),
+            dirStr,
+            rec.symbol,
+            DoubleToString(rec.volume, 2),
+
+            DoubleToString(rec.requestedOpenPrice, symbolDigits),
+            DoubleToString(rec.executedOpenPrice, symbolDigits),
+            DoubleToString(rec.closePrice, symbolDigits),
+
+            DoubleToString(rec.commission, 2),
+            DoubleToString(rec.swap, 2),
+            DoubleToString(rec.profit, 2),
+            DoubleToString(rec.netProfit, 2),
+            DoubleToString(rec.balanceAfter, 2),
+            (int)rec.durationMinutes,
+            (long)rec.magic,
+
+            c,
+            rec.closeReason,
+
+            DoubleToString(rec.spreadPtsAtOpen, 1),
+            DoubleToString(rec.slippagePtsAtOpen, 1),
+            DoubleToString(rec.sl, symbolDigits),
+            DoubleToString(rec.tp, symbolDigits),
+
+            DoubleToString(rec.scorePctAtEntry, 1),
+            DoubleToString(rec.thresholdBasePct, 1),
+            DoubleToString(rec.thresholdEffPct, 1),
+            DoubleToString(rec.hurstSoftMult, 2),
+
+            (int)rec.thresholdMethodId,
+            ThresholdMethodToString(rec.thresholdMethodId),
+
+            DoubleToString(rec.tfCoherenceMult, 2),
+            (int)rec.tfCoherenceConflicts,
+            (int)rec.tfCoherenceSupports,
+            (int)rec.tfCoherenceBlocked,
+
+            DoubleToString(rec.hurstTradeScore, 6),
+            DoubleToString(rec.hurstTradeThreshold, 6),
+            (int)rec.hurstReady,
+            (int)rec.hurstAllowTrade,
+
+            DoubleToString(rec.hurstGlobal, 6),
+            DoubleToString(rec.hurstComposite, 6),
+            DoubleToString(rec.hurstCenter, 6),
+            DoubleToString(rec.hurstStdev, 6),
+
+            (int)rec.regimeM5,
+            RegimeToStringInt(rec.regimeM5),
+            (int)rec.regimeH1,
+            RegimeToStringInt(rec.regimeH1),
+            (int)rec.regimeH4,
+            RegimeToStringInt(rec.regimeH4),
+            (int)rec.regimeD1,
+            RegimeToStringInt(rec.regimeD1));
+
+        exported++;
+    }
+
+    FileClose(fileHandle);
+    PrintFormat("[EXPORT-EXT] Esportati %d trade estesi in %s (%s)", exported, filename, wroteToCommon ? "COMMON" : "LOCAL");
+}
+
+// ---------------------------------------------------------------------------
 // v1.1: SOGLIA ADATTIVA OTSU -> YOUDEN
 // Fase 1 (warm-up): Otsu - separazione bimodale degli score
 // Fase 2 (feedback): Youden - massimizza TPR + TNR - 1 basato su profitti
@@ -1087,17 +1602,6 @@ double g_openScores[];                    // Score al momento dell'apertura
 int    g_openTicketsCount = 0;            // Numero posizioni tracciate
 int    g_openTicketsMax = 0;              // Max posizioni = g_recentTradesMax
 
-// Stato corrente del regime Hurst (aggiornato periodicamente)
-enum ENUM_HURST_REGIME {
-    HURST_TRENDING = 1,      // H > zona random: trend persistence
-    HURST_RANDOM = 0,        // dentro zona random: random walk
-    HURST_MEANREV = -1       // H < zona random: mean reversion
-};
-
-ENUM_HURST_REGIME g_hurstRegime_M5 = HURST_RANDOM;
-ENUM_HURST_REGIME g_hurstRegime_H1 = HURST_RANDOM;
-ENUM_HURST_REGIME g_hurstRegime_H4 = HURST_RANDOM;
-ENUM_HURST_REGIME g_hurstRegime_D1 = HURST_RANDOM;
 double g_hurstComposite = 0.0;           // H PESATO composito (calcolato dai dati)
 double g_hurstConfidence = 0.0;          // Confidenza (0-1) basata su distanza da centro
 double g_hurstTradeScore = 0.0;          // Trade score = |H - centro| * confidence / (stdev * f)
@@ -3046,6 +3550,21 @@ void RecalculateHurstSumsFromScratch()
 bool IsTradeAllowedByHurst()
 {
     if (!EnableHurstFilter) return true;  // Filtro disabilitato
+
+    // OPTION 1 (SOFT): non bloccare le entry, ma applicare una penalita' di soglia in ExecuteVotingLogic().
+    // Questo evita di “tagliare” tutto in regime random e lascia spazio a segnali molto forti.
+    if (EnableHurstSoftMode) {
+        if (!g_hurstReady) {
+            // Manteniamo comunque il log di warmup per trasparenza.
+            int logInterval = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+            static int hurstNotReadyCountSoft = 0;
+            hurstNotReadyCountSoft++;
+            if (hurstNotReadyCountSoft == 1 || hurstNotReadyCountSoft % logInterval == 0) {
+                PrintFormat("[HURST] Hurst NON pronto (%d barre) - soft mode: trading NON bloccato (penalita' soglia disattiva)", hurstNotReadyCountSoft);
+            }
+        }
+        return true;
+    }
     
     // Il ricalcolo avviene ad ogni nuova barra in RecalculateOrganicSystem()
     // Qui verifichiamo solo il flag
@@ -3070,6 +3589,51 @@ bool IsTradeAllowedByHurst()
     //  FIX: Log "TRADE BLOCCATO" rimosso - stampato in ExecuteTrades solo se c'era segnale
     
     return g_hurstAllowTrade;
+}
+
+//+------------------------------------------------------------------+
+//| OPTION 1 (SOFT): moltiplicatore soglia entry basato su Hurst      |
+//| - Se HurstTradeScore < TradeScoreThreshold: aumenta la soglia     |
+//| - Se HurstTradeScore >= TradeScoreThreshold: nessuna penalita'    |
+//| Nota: non fa blocco hard, solo modulazione aggressivita'          |
+//+------------------------------------------------------------------+
+double GetHurstSoftThresholdMultiplier()
+{
+    if (!EnableHurstFilter) return 1.0;
+    if (!EnableHurstSoftMode) return 1.0;
+    if (!g_hurstReady) return 1.0;
+
+    // Se il filtro "hard" permetterebbe comunque, niente penalita'.
+    if (g_hurstAllowTrade) return 1.0;
+
+    double baseThr = g_tradeScoreThreshold;
+    if (baseThr <= 0.0) return 1.0;
+
+    double maxPenaltyPct = MathMax(0.0, HurstSoftMaxPenaltyPct);
+    if (maxPenaltyPct <= 0.0) return 1.0;
+    if (maxPenaltyPct > 300.0) maxPenaltyPct = 300.0; // safety: max x4
+
+    // deficit in [0..1]
+    double deficit = (baseThr - g_hurstTradeScore) / baseThr;
+    if (deficit < 0.0) deficit = 0.0;
+    if (deficit > 1.0) deficit = 1.0;
+
+    double maxMult = 1.0 + (maxPenaltyPct / 100.0);
+    double mult = 1.0 + deficit * (maxMult - 1.0);
+    if (mult < 1.0) mult = 1.0;
+    return mult;
+}
+
+// Tag compatto per i log [DECISION]
+string GetHurstSoftDecisionTag(bool includeScore)
+{
+    if (!g_lastHurstSoftActive) return "";
+    if (includeScore) {
+        return StringFormat(" | HurstSoft x%.2f effThr=%.1f%% baseThr=%.1f%% score=%.1f%%",
+            g_lastHurstSoftMult, g_lastThresholdEffPct, g_lastThresholdBasePct, g_lastScorePct);
+    }
+    return StringFormat(" | HurstSoft x%.2f effThr=%.1f%%",
+        g_lastHurstSoftMult, g_lastThresholdEffPct);
 }
 
 //+------------------------------------------------------------------+
@@ -3235,6 +3799,21 @@ double GetAndRemoveTradeScore(ulong ticket)
     
     // Ticket non trovato - potrebbe essere trade pre-v1.1 o errore
     return 0.0;
+}
+
+// Lettura NON distruttiva: utile per chiusure parziali (posizione ancora aperta)
+bool GetTradeScore(ulong ticket, double &outScore)
+{
+    outScore = 0.0;
+    int ticketsMax = ArraySize(g_openTickets);
+    if (ticket == 0 || ticketsMax == 0) return false;
+    for (int i = 0; i < ticketsMax; i++) {
+        if (g_openTickets[i] == ticket) {
+            outScore = g_openScores[i];
+            return (outScore > 0.0);
+        }
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -5618,6 +6197,16 @@ void OnDeinit(const int reason)
     } else {
         Print("[DEINIT] Export CSV disabilitato (ExportTradesCSV=false)");
     }
+
+    // ---------------------------------------------------------------
+    // EXPORT ESTESO (secondo file, non rompe montecarlo_analyzer.py)
+    // ---------------------------------------------------------------
+    if (ExportExtendedTradesCSV) {
+        Print("[DEINIT] Avvio esportazione trade CSV esteso...");
+        ExportExtendedTradesToCSV();
+    } else {
+        Print("[DEINIT] Export CSV esteso disabilitato (ExportExtendedTradesCSV=false)");
+    }
     
     EventKillTimer();
     if (g_enableLogsEffective) Print("[DEINIT] Timer terminato");
@@ -7505,31 +8094,57 @@ void ExecuteTradingLogic()
 {
     // Esegui logica di voto
     int voteResult = ExecuteVotingLogic();
-    string voteStr = (voteResult == 1) ? "BUY" : ((voteResult == -1) ? "SELL" : "NEUTRAL");
+    int decisionDir = (voteResult != 0) ? voteResult : (g_lastHurstSoftSuppressed ? g_lastDominantDirection : 0);
+    string voteStr = (decisionDir == 1) ? "BUY" : ((decisionDir == -1) ? "SELL" : "NEUTRAL");
     if (g_enableLogsEffective) {
         PrintFormat("[VOTE] Risultato: %s (score raw: %d)", voteStr, voteResult);
+    }
+
+    // Entry attempt = c'e' un segnale (voteResult!=0) oppure soft-hurst ha soppresso un'entry (base ok, eff no)
+    bool entryAttempt = (voteResult != 0) || g_lastHurstSoftSuppressed;
+
+    // Helper: contesto compatto non ripetitivo per debug
+    string ctx = "";
+    if (entryAttempt) {
+        ctx = StringFormat(" | score=%.1f%% thr=%.1f%% eff=%.1f%%", g_lastScorePct, g_lastThresholdBasePct, g_lastThresholdEffPct);
+        if (EnableHurstFilter) {
+            string hState = g_hurstReady ? (g_hurstAllowTrade ? "OK" : "BLOCK") : "NR";
+            ctx += StringFormat(" | Hts=%.4f/%.4f:%s", g_hurstTradeScore, g_tradeScoreThreshold, hState);
+        }
+        if (g_lastHurstSoftActive) {
+            ctx += StringFormat(" | Hsoft x%.2f", g_lastHurstSoftMult);
+        }
+        if (g_lastTFCoherenceActive) {
+            if (g_lastTFCoherenceBlocked) {
+                ctx += StringFormat(" | TFcoh=BLOCK (conf=%d sup=%d)", g_lastTFCoherenceConflictCount, g_lastTFCoherenceSupportCount);
+            } else if (g_lastTFCoherenceMult > 1.0001) {
+                ctx += StringFormat(" | TFcoh x%.2f (conf=%d sup=%d)", g_lastTFCoherenceMult, g_lastTFCoherenceConflictCount, g_lastTFCoherenceSupportCount);
+            } else {
+                ctx += StringFormat(" | TFcoh OK (conf=%d sup=%d)", g_lastTFCoherenceConflictCount, g_lastTFCoherenceSupportCount);
+            }
+        }
     }
     
     // Controlla se deve eseguire trades
     if (!enableTrading) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: trading disabled (enableTrading=false)", voteStr);
+        if (EnableLogs && entryAttempt) PrintFormat("[DECISION] %s | NO ENTRY: trading disabled (enableTrading=false)%s", voteStr, ctx);
         return;
     }
     
     //  VERIFICA PERMESSI TRADING TERMINALE/BROKER
     if (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: terminal trade not allowed", voteStr);
+        if (EnableLogs && entryAttempt) PrintFormat("[DECISION] %s | NO ENTRY: terminal trade not allowed%s", voteStr, ctx);
         return;
     }
     if (!MQLInfoInteger(MQL_TRADE_ALLOWED)) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: EA trade not allowed (AutoTrading)", voteStr);
+        if (EnableLogs && entryAttempt) PrintFormat("[DECISION] %s | NO ENTRY: EA trade not allowed (AutoTrading)%s", voteStr, ctx);
         return;
     }
     
     //  VERIFICA SIMBOLO TRADABILE
     long tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
     if (tradeMode == SYMBOL_TRADE_MODE_DISABLED) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: symbol not tradable (trade mode disabled)", voteStr);
+        if (EnableLogs && entryAttempt) PrintFormat("[DECISION] %s | NO ENTRY: symbol not tradable (trade mode disabled)%s", voteStr, ctx);
         return;
     }
     
@@ -7537,18 +8152,23 @@ void ExecuteTradingLogic()
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double spread = ask - bid;
+    double spreadPts = (spread > 0 && _Point > 0) ? (spread / _Point) : 0.0;
+    if (entryAttempt) {
+        ctx += StringFormat(" | spr=%.1fpt", spreadPts);
+    }
     
     // Filtro spread
     if (voteResult != 0 && MaxSpread > 0 && spread > MaxSpread * _Point) {
-        if (EnableLogs) {
-            PrintFormat("[DECISION] %s | NO ENTRY: spread too high (%.1f pts > %.1f pts max)",
-                voteStr, spread / _Point, MaxSpread);
-        }
+        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: spread too high (%.1fpt > %.1fpt max)%s", voteStr, spreadPts, MaxSpread, ctx);
         return;
     }
     
     // Conta posizioni aperte
     int openPositions = CountOpenPositions();
+    if (entryAttempt) {
+        if (MaxOpenTrades > 0) ctx += StringFormat(" | pos=%d/%d", openPositions, MaxOpenTrades);
+        else ctx += StringFormat(" | pos=%d", openPositions);
+    }
     
     if (MaxOpenTrades > 0 && openPositions >= MaxOpenTrades) {
         // FIX: Log SEMPRE quando max posizioni raggiunto
@@ -7557,9 +8177,7 @@ void ExecuteTradingLogic()
         if (maxPosBlockCount <= 3 || maxPosBlockCount % 20 == 0) {
             PrintFormat("[TRADE BLOCK MaxPos #%d] Posizioni: %d/%d - skip", maxPosBlockCount, openPositions, MaxOpenTrades);
         }
-        if (voteResult != 0 && EnableLogs) {
-            PrintFormat("[DECISION] %s | NO ENTRY: max positions (%d/%d)", voteStr, openPositions, MaxOpenTrades);
-        }
+        if (EnableLogs && entryAttempt) PrintFormat("[DECISION] %s | NO ENTRY: max positions%s", voteStr, ctx);
         return;
     }
     
@@ -7582,8 +8200,7 @@ void ExecuteTradingLogic()
                 g_hurstComposite, g_hurstCenter, g_hurstStdev);
         }
         if (EnableLogs) {
-            PrintFormat("[DECISION] %s | NO ENTRY: hurst filter (TradeScore=%.4f < Thr=%.4f)",
-                voteStr, g_hurstTradeScore, g_tradeScoreThreshold);
+            PrintFormat("[DECISION] %s | NO ENTRY: hurst filter hard block%s", voteStr, ctx);
         }
         return;
     }
@@ -7598,6 +8215,7 @@ void ExecuteTradingLogic()
         string cbReason = "";
         int cbRemain = 0;
         if (!CB_AllowNewEntries(cbReason, cbRemain)) {
+            if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: circuit breaker (%s, rem=%ds)%s", voteStr, cbReason, cbRemain, ctx);
             static int cbBlockCount = 0;
             cbBlockCount++;
             datetime now = TimeCurrent();
@@ -7623,30 +8241,64 @@ void ExecuteTradingLogic()
         }
     }
 
+    // TF Coherence (hard block): blocco finale prima di inviare ordini
+    if (EnableTFCoherenceFilter && TFCoherenceHardBlock && voteResult != 0 && g_lastTFCoherenceBlocked) {
+        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: TF coherence hard block%s", voteStr, ctx);
+        return;
+    }
+
+    // Caso speciale: soft-hurst ha soppresso un'entry (base ok, eff no)
+    if (g_lastHurstSoftSuppressed && voteResult == 0) {
+        if (EnableLogs) PrintFormat("[DECISION] %s | NO ENTRY: hurst soft raised threshold%s", voteStr, ctx);
+        return;
+    }
+
+    // Riepilogo Soft Hurst: utile nei backtest lunghi (throttle per N barre)
+    if (EnableLogs && EnableHurstFilter && EnableHurstSoftMode && HurstSoftSummaryEveryBars > 0) {
+        static int softBarCounter = 0;
+        static bool softWasActive = false;
+        softBarCounter++;
+        if (softBarCounter > 1000000) softBarCounter = 1;
+
+        bool softActiveNow = g_lastHurstSoftActive;
+        if (softActiveNow && !softWasActive) {
+            PrintFormat("[HURST SOFT] ATTIVO%s | TradeScore=%.4f < Thr=%.4f",
+                GetHurstSoftDecisionTag(true), g_hurstTradeScore, g_tradeScoreThreshold);
+        } else if (!softActiveNow && softWasActive) {
+            PrintFormat("[HURST SOFT] DISATTIVO (no penalty) | TradeScore=%.4f >= Thr=%.4f",
+                g_hurstTradeScore, g_tradeScoreThreshold);
+        }
+
+        if (softActiveNow && (softBarCounter == 1 || (softBarCounter % HurstSoftSummaryEveryBars) == 0)) {
+            PrintFormat("[HURST SOFT] snapshot%s | TradeScore=%.4f < Thr=%.4f | H=%.3f Centro=%.3f Stdev=%.4f",
+                GetHurstSoftDecisionTag(true), g_hurstTradeScore, g_tradeScoreThreshold,
+                g_hurstComposite, g_hurstCenter, g_hurstStdev);
+        }
+        softWasActive = softActiveNow;
+    }
+
     // Log sblocco (una volta) quando cooldown termina
     CB_LogUnblockTransitions();
     
     // Esegui trades basati su voto
     if (voteResult == -1) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | ENTRY allowed: sending order", voteStr);
+        if (EnableLogs) PrintFormat("[DECISION] %s | ENTRY allowed: sending order%s", voteStr, ctx);
         if (g_enableLogsEffective) Print("[TRADE] SEGNALE SELL CONFERMATO - Apertura ordine...");
         OpenSellOrder();
     }
     else if (voteResult == 1) {
-        if (EnableLogs) PrintFormat("[DECISION] %s | ENTRY allowed: sending order", voteStr);
+        if (EnableLogs) PrintFormat("[DECISION] %s | ENTRY allowed: sending order%s", voteStr, ctx);
         if (g_enableLogsEffective) Print("[TRADE] SEGNALE BUY CONFERMATO - Apertura ordine...");
         OpenBuyOrder();
     }
     else {
-        // Nessun segnale (o score sotto soglia) => spiegazione compatta ogni barra
+        // Nessun segnale: evita spam. Logga solo ogni tanto (utile in backtest per vedere che l'EA e' vivo).
         if (EnableLogs) {
-            int opErr = 0, opWin = 0, opRemain = 0;
-            CB_GetOperationalSnapshot(TimeCurrent(), opErr, opWin, opRemain);
-            int perfCount = 0, perfWins = 0, perfRemain = 0, perfLossStreak = 0;
-            double perfNet = 0.0, perfWR = 0.0;
-            CB_GetPerformanceSnapshot(perfCount, perfWins, perfNet, perfWR, perfLossStreak, perfRemain);
-            PrintFormat("[DECISION] %s | NO ENTRY: no signal/threshold | CB: opRem=%ds perfRem=%ds",
-                voteStr, opRemain, perfRemain);
+            static int noSignalCount = 0;
+            noSignalCount++;
+            if (noSignalCount == 1 || noSignalCount == 10 || noSignalCount % 50 == 0) {
+                PrintFormat("[DECISION] %s | NO ENTRY: no signal", voteStr);
+            }
         }
     }
     // FIX: Rimosso log "Nessun segnale - in attesa..." - troppo verboso (ogni 5 min)
@@ -7787,7 +8439,7 @@ int ExecuteVotingLogic()
         ok &= (CopyBuffer(bbHandle_M5, 2, 1, 1, bbLow) > 0);
         ok &= (CopyBuffer(atrHandle_M5, 0, 1, 1, atrBuf) > 0);
         ok &= (CopyBuffer(adxHandle_M5, 0, 1, 1, adxBuf) > 0);
-        
+
         if (!ok) {
             Print("[ERROR] CopyBuffer fallito nella logica di voto (M5)");
             return 0;
@@ -7805,7 +8457,7 @@ int ExecuteVotingLogic()
             Print("[ERROR] Dati M5 insufficienti per valutazione");
             return 0;
         }
-        
+
         // Calcolo condizioni M5 con enable bool
         // NOTA: Logica coerente con CalculateSignalScore()
         //  Usa centri EMPIRICI dalla struct tfData invece di costanti hardcoded!
@@ -7816,7 +8468,7 @@ int ExecuteVotingLogic()
         double bbMiddle = (bbUp[0] + bbLow[0]) / 2.0;
         cBB   = enableBB          && (price > bbMiddle);
         // NOTA: ATR e ADX sono indicatori NON direzionali, usati solo come filtri (non partecipano al voto)
-        
+
         //  Controlli array bounds per indicatori da struct tfData
         cHeikin = false;
         if (enableHeikin && ArraySize(tfData_M5.ha_close) > latestIdxM5 && ArraySize(tfData_M5.ha_open) > latestIdxM5) {
@@ -8234,6 +8886,9 @@ int ExecuteVotingLogic()
     double scorePct = (maxScorePossible > 0) ? (MathAbs(totalScore) / maxScorePossible) * 100.0 : 0;
     bool isBuy = (totalScore > 0);
     bool isSell = (totalScore < 0);
+
+    // Salva direzione dominante (anche se poi la decision finale e' 0)
+    g_lastDominantDirection = isBuy ? 1 : (isSell ? -1 : 0);
     
     // v1.1: GetReversalSignal per tracciare statistiche (soglia data-driven)
     // I detector sono gia stati chiamati sopra, questa chiamata aggiorna solo il buffer storico
@@ -8246,6 +8901,39 @@ int ExecuteVotingLogic()
     
     // OTTIENI SOGLIA CORRENTE (automatica o manuale, con fallback)
     double currentThreshold = GetCurrentThreshold();
+
+    // OPTION 1 (SOFT HURST): quando il regime e' "random" (TradeScore Hurst sotto soglia),
+    // non blocchiamo hard, ma alziamo la soglia effettiva richiesta per entrare.
+    double hurstSoftMult = GetHurstSoftThresholdMultiplier();
+    double effectiveThreshold = currentThreshold * hurstSoftMult;
+    if (effectiveThreshold > 100.0) effectiveThreshold = 100.0;
+
+    // TF COHERENCE: penalizza o blocca in caso di conflitto tra regimi TF
+    double tfCohMult = 1.0;
+    int tfCohConf = 0;
+    int tfCohSup = 0;
+    bool tfCohOk = GetTFCoherenceDecision((isBuy ? 1 : (isSell ? -1 : 0)), tfCohMult, tfCohConf, tfCohSup);
+    bool tfCohBlocked = EnableTFCoherenceFilter && TFCoherenceHardBlock && !tfCohOk;
+    if (!tfCohBlocked) {
+        effectiveThreshold *= tfCohMult;
+        if (effectiveThreshold > 100.0) effectiveThreshold = 100.0;
+    }
+
+    // Salva diagnostica per log DECISION (ExecuteTradingLogic)
+    g_lastHurstSoftMult = hurstSoftMult;
+    g_lastThresholdBasePct = currentThreshold;
+    g_lastThresholdEffPct = effectiveThreshold;
+    g_lastScorePct = scorePct;
+    g_lastHurstSoftActive = (EnableHurstFilter && EnableHurstSoftMode && (hurstSoftMult > 1.0001));
+    bool wouldPassBase = (isBuy && scorePct >= currentThreshold) || (isSell && scorePct >= currentThreshold);
+    bool wouldPassEff  = (isBuy && scorePct >= effectiveThreshold) || (isSell && scorePct >= effectiveThreshold);
+    g_lastHurstSoftSuppressed = (g_lastHurstSoftActive && wouldPassBase && !wouldPassEff);
+
+    g_lastTFCoherenceActive = EnableTFCoherenceFilter;
+    g_lastTFCoherenceMult = tfCohMult;
+    g_lastTFCoherenceBlocked = tfCohBlocked;
+    g_lastTFCoherenceConflictCount = tfCohConf;
+    g_lastTFCoherenceSupportCount = tfCohSup;
     
     // Minimo campioni per soglia automatica = 16 (BUFFER_SIZE_MEDIUM)
     int minSamplesForLog = GetBufferMedium();
@@ -8267,8 +8955,13 @@ int ExecuteVotingLogic()
         else
             thresholdType = StringFormat("FALLBACK:%d/%d", g_scoreHistorySize, minSamplesForLog);
         
-        PrintFormat("[SCORE DEBUG] Score: %+.2f | Max: %.2f | Pct: %.2f%% | Soglia: %.1f%% (%s)",
-            totalScore, maxScorePossible, scorePct, currentThreshold, thresholdType);
+        if (hurstSoftMult > 1.0001) {
+            PrintFormat("[SCORE DEBUG] Score: %+.2f | Max: %.2f | Pct: %.2f%% | Soglia: %.1f%% (%s) | HurstSoft x%.2f -> Eff=%.1f%%",
+                totalScore, maxScorePossible, scorePct, currentThreshold, thresholdType, hurstSoftMult, effectiveThreshold);
+        } else {
+            PrintFormat("[SCORE DEBUG] Score: %+.2f | Max: %.2f | Pct: %.2f%% | Soglia: %.1f%% (%s)",
+                totalScore, maxScorePossible, scorePct, currentThreshold, thresholdType);
+        }
         PrintFormat("   Peso indicatori: %.2f (PRIMARY:%.0f + SUPPORT:%.2f + FILTER:%.0f) | Direzione: %s", 
             totalIndicatorWeight, weightTrendPrimary, weightTrendSupport, weightTrendFilter,
             isBuy ? "BUY" : isSell ? "SELL" : "NEUTRA");
@@ -8290,10 +8983,10 @@ int ExecuteVotingLogic()
     bool reversalBoost = false;      // True se reversal permette entry anticipato
     
     // STEP 1: Valuta segnale normale (score sopra soglia)
-    if (isBuy && scorePct >= currentThreshold) {
+    if (isBuy && scorePct >= effectiveThreshold) {
         decision = 1;
     }
-    else if (isSell && scorePct >= currentThreshold) {
+    else if (isSell && scorePct >= effectiveThreshold) {
         decision = -1;
     }
     
@@ -8304,7 +8997,7 @@ int ExecuteVotingLogic()
                               (reversalSignal == -1 && totalScore <= 0);
         
         // Soglia ridotta = soglia * decay(H) (circa 60-70% della normale)
-        double reversalThreshold = currentThreshold * GetOrganicDecay(g_hurstGlobal);
+        double reversalThreshold = effectiveThreshold * GetOrganicDecay(g_hurstGlobal);
         
         // Log dettagliato analisi entry anticipato
         if (g_enableLogsEffective && (reversalStrength >= g_reversalThreshold || scorePct >= reversalThreshold * 0.8)) {
@@ -8315,7 +9008,7 @@ int ExecuteVotingLogic()
                 reversalStrength * 100, g_reversalThreshold * 100,
                 reversalStrength >= g_reversalThreshold ? "OK" : "NO");
             PrintFormat("   Score: %.1f%% vs soglia ridotta %.1f%% (%.1f%%  %.3f decay)",
-                scorePct, reversalThreshold, currentThreshold, GetOrganicDecay(g_hurstGlobal));
+                scorePct, reversalThreshold, effectiveThreshold, GetOrganicDecay(g_hurstGlobal));
             PrintFormat("   Breakdown: Total=%+.3f Trend=%+.3f MeanRev=%+.3f",
                 totalScore, totalScore - meanRevScore, meanRevScore);
             PrintFormat("   TF Scores: M5=%+.2f H1=%+.2f H4=%+.2f D1=%+.2f",
@@ -8351,23 +9044,28 @@ int ExecuteVotingLogic()
                 reversalSignal == 1 ? "BULLISH" : "BEARISH", reversalStrength * 100);
         } else if (meanRevScore != 0 && ((meanRevScore > 0 && decision == 1) || (meanRevScore < 0 && decision == -1))) {
             // Trade con contributo mean-reversion concorde
-            PrintFormat("[VOTE] ? %s CONFERMATO | Score: %.1f%% (Mean-Rev: %+.3f concorde)",
+            PrintFormat("[VOTE] %s CONFERMATO | Score: %.1f%% (Mean-Rev: %+.3f concorde)",
                 decisionText, scorePct, meanRevScore);
         } else if (meanRevScore != 0) {
             // Trade nonostante mean-reversion contrario (trend dominante)
-            PrintFormat("[VOTE] ? %s APPROVATO | Score: %.1f%% (Mean-Rev: %+.3f contrario, trend domina)",
+            PrintFormat("[VOTE] %s APPROVATO | Score: %.1f%% (Mean-Rev: %+.3f contrario, trend domina)",
                 decisionText, scorePct, meanRevScore);
         } else {
             // Trade normale senza mean-reversion significativo
-            PrintFormat("[VOTE] ? %s APPROVATO | Score: %.1f%% >= %.1f%% soglia",
+            PrintFormat("[VOTE] %s APPROVATO | Score: %.1f%% >= %.1f%% soglia",
                 decisionText, scorePct, currentThreshold);
         }
     }
     else if (g_enableLogsEffective) {
         // Nessun trade
         string reason = "";
-        if (scorePct < currentThreshold) {
-            reason = StringFormat("Score %.1f%% < %.1f%% soglia", scorePct, currentThreshold);
+        if (scorePct < effectiveThreshold) {
+            if (g_lastHurstSoftActive) {
+                reason = StringFormat("Score %.1f%% < %.1f%% soglia (HurstSoft x%.2f, base=%.1f%%)",
+                    scorePct, effectiveThreshold, hurstSoftMult, currentThreshold);
+            } else {
+                reason = StringFormat("Score %.1f%% < %.1f%% soglia", scorePct, currentThreshold);
+            }
         } else {
             reason = "Direzione neutra";
         }
@@ -8465,6 +9163,51 @@ void OpenSellOrder()
         ulong positionId = ResolvePositionIdFromDealTicket(dealTicket);
         if (positionId == 0) positionId = dealTicket;  // Fallback (coperto anche dal fallback in OnTradeTransaction)
         RegisterOpenTradeScore(positionId, g_lastEntryScore);
+
+        // EXPORT ESTESO: snapshot entry (serve per CSV esteso e debug serio)
+        EntrySnapshot snap;
+        snap.positionId = positionId;
+        snap.openTime = TimeCurrent();
+        snap.direction = -1;
+        snap.volume = finalLot;
+        snap.requestedPrice = bidBefore;
+        snap.executedPrice = executedPrice;
+        snap.sl = sl;
+        snap.tp = tp;
+        snap.spreadPtsAtOpen = spreadBefore;
+        snap.slippagePtsAtOpen = slippagePoints;
+
+        snap.scorePctAtEntry = g_lastEntryScore;
+        snap.thresholdBasePct = g_lastThresholdBasePct;
+        snap.thresholdEffPct = g_lastThresholdEffPct;
+        // Metodo soglia al momento dell'entry (serve per validare OTSU/YOUDEN offline)
+        if (!AutoScoreThreshold) {
+            snap.thresholdMethodId = 0;
+        } else if (!g_scoreThresholdReady) {
+            snap.thresholdMethodId = 1;
+        } else {
+            snap.thresholdMethodId = g_youdenReady ? 3 : 2;
+        }
+        snap.hurstSoftMult = g_lastHurstSoftMult;
+        snap.tfCoherenceMult = g_lastTFCoherenceMult;
+        snap.tfCoherenceConflicts = g_lastTFCoherenceConflictCount;
+        snap.tfCoherenceSupports = g_lastTFCoherenceSupportCount;
+        snap.tfCoherenceBlocked = g_lastTFCoherenceBlocked ? 1 : 0;
+
+        snap.hurstTradeScore = g_hurstTradeScore;
+        snap.hurstTradeThreshold = g_tradeScoreThreshold;
+        snap.hurstReady = g_hurstReady ? 1 : 0;
+        snap.hurstAllowTrade = g_hurstAllowTrade ? 1 : 0;
+        snap.hurstGlobal = g_hurstGlobal;
+        snap.hurstComposite = g_hurstComposite;
+        snap.hurstCenter = g_hurstCenter;
+        snap.hurstStdev = g_hurstStdev;
+        snap.regimeM5 = RegimeToInt(g_hurstRegime_M5);
+        snap.regimeH1 = RegimeToInt(g_hurstRegime_H1);
+        snap.regimeH4 = RegimeToInt(g_hurstRegime_H4);
+        snap.regimeD1 = RegimeToInt(g_hurstRegime_D1);
+
+        RegisterEntrySnapshot(snap);
         
         // Aggiorna statistiche
         g_stats.totalSlippage += MathAbs(slippagePoints);
@@ -8489,6 +9232,16 @@ void OpenSellOrder()
             double rr = (riskPips > 0 && rewardPips > 0) ? rewardPips / riskPips : 0;
             PrintFormat("   Risk (SL): %.2f pips | Reward (TP): %.2f pips | R:R=1:%.2f",
                 riskPips, rewardPips, rr);
+        }
+
+        if (EnableLogs && ExportExtendedTradesCSV) {
+            PrintFormat("[SNAP] EntrySnapshot saved #%I64u | score=%.1f%% thr=%.1f%% eff=%.1f%% | Hsoft x%.2f | TFcoh x%.2f (c=%d s=%d) | Hts=%.4f/%.4f %s",
+                positionId,
+                snap.scorePctAtEntry, snap.thresholdBasePct, snap.thresholdEffPct,
+                snap.hurstSoftMult,
+                snap.tfCoherenceMult, snap.tfCoherenceConflicts, snap.tfCoherenceSupports,
+                snap.hurstTradeScore, snap.hurstTradeThreshold,
+                snap.hurstReady ? (snap.hurstAllowTrade ? "OK" : "BLOCK") : "NR");
         }
     } else {
         int errCode = GetLastError();
@@ -8570,6 +9323,50 @@ void OpenBuyOrder()
         ulong positionId = ResolvePositionIdFromDealTicket(dealTicket);
         if (positionId == 0) positionId = dealTicket;  // Fallback
         RegisterOpenTradeScore(positionId, g_lastEntryScore);
+
+        // EXPORT ESTESO: snapshot entry
+        EntrySnapshot snap;
+        snap.positionId = positionId;
+        snap.openTime = TimeCurrent();
+        snap.direction = 1;
+        snap.volume = finalLot;
+        snap.requestedPrice = askBefore;
+        snap.executedPrice = executedPrice;
+        snap.sl = sl;
+        snap.tp = tp;
+        snap.spreadPtsAtOpen = spreadBefore;
+        snap.slippagePtsAtOpen = slippagePoints;
+
+        snap.scorePctAtEntry = g_lastEntryScore;
+        snap.thresholdBasePct = g_lastThresholdBasePct;
+        snap.thresholdEffPct = g_lastThresholdEffPct;
+        if (!AutoScoreThreshold) {
+            snap.thresholdMethodId = 0;
+        } else if (!g_scoreThresholdReady) {
+            snap.thresholdMethodId = 1;
+        } else {
+            snap.thresholdMethodId = g_youdenReady ? 3 : 2;
+        }
+        snap.hurstSoftMult = g_lastHurstSoftMult;
+        snap.tfCoherenceMult = g_lastTFCoherenceMult;
+        snap.tfCoherenceConflicts = g_lastTFCoherenceConflictCount;
+        snap.tfCoherenceSupports = g_lastTFCoherenceSupportCount;
+        snap.tfCoherenceBlocked = g_lastTFCoherenceBlocked ? 1 : 0;
+
+        snap.hurstTradeScore = g_hurstTradeScore;
+        snap.hurstTradeThreshold = g_tradeScoreThreshold;
+        snap.hurstReady = g_hurstReady ? 1 : 0;
+        snap.hurstAllowTrade = g_hurstAllowTrade ? 1 : 0;
+        snap.hurstGlobal = g_hurstGlobal;
+        snap.hurstComposite = g_hurstComposite;
+        snap.hurstCenter = g_hurstCenter;
+        snap.hurstStdev = g_hurstStdev;
+        snap.regimeM5 = RegimeToInt(g_hurstRegime_M5);
+        snap.regimeH1 = RegimeToInt(g_hurstRegime_H1);
+        snap.regimeH4 = RegimeToInt(g_hurstRegime_H4);
+        snap.regimeD1 = RegimeToInt(g_hurstRegime_D1);
+
+        RegisterEntrySnapshot(snap);
         
         // Aggiorna statistiche
         g_stats.totalSlippage += MathAbs(slippagePoints);
@@ -8594,6 +9391,16 @@ void OpenBuyOrder()
             double rr = (riskPips > 0 && rewardPips > 0) ? rewardPips / riskPips : 0;
             PrintFormat("   Risk (SL): %.2f pips | Reward (TP): %.2f pips | R:R=1:%.2f",
                 riskPips, rewardPips, rr);
+        }
+
+        if (EnableLogs && ExportExtendedTradesCSV) {
+            PrintFormat("[SNAP] EntrySnapshot saved #%I64u | score=%.1f%% thr=%.1f%% eff=%.1f%% | Hsoft x%.2f | TFcoh x%.2f (c=%d s=%d) | Hts=%.4f/%.4f %s",
+                positionId,
+                snap.scorePctAtEntry, snap.thresholdBasePct, snap.thresholdEffPct,
+                snap.hurstSoftMult,
+                snap.tfCoherenceMult, snap.tfCoherenceConflicts, snap.tfCoherenceSupports,
+                snap.hurstTradeScore, snap.hurstTradeThreshold,
+                snap.hurstReady ? (snap.hurstAllowTrade ? "OK" : "BLOCK") : "NR");
         }
     } else {
         int errCode = GetLastError();
@@ -8913,11 +9720,11 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
     // Ci interessa solo la chiusura di posizioni (DEAL)
     if (trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
     
-    // Verifica che sia una chiusura (DEAL_ENTRY_OUT)
+    // Verifica che sia una chiusura (DEAL_ENTRY_OUT / INOUT)
     if (!HistoryDealSelect(trans.deal)) return;
     
     ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-    if (entry != DEAL_ENTRY_OUT) return;
+    if (entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) return;
     
     // Verifica Magic Number
     long dealMagic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
@@ -8936,7 +9743,8 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
     double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
     double closePrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
     ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(trans.deal, DEAL_TYPE);
-    ulong positionId = HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+    ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+    if (positionId == 0) return;
     
     // Profitto netto (inclusi commission e swap)
     double netProfit = profit + commission + swap;
@@ -8971,6 +9779,43 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
             break;
         }
     }
+
+    // ---------------------------------------------------------------
+    // EXPORT ESTESO: usa snapshot entry (se disponibile)
+    // ---------------------------------------------------------------
+    EntrySnapshot snap;
+    ZeroMemory(snap);
+    bool snapFound = false;
+
+    // Se la posizione è ancora aperta (chiusura parziale), NON rimuovere lo snapshot.
+    // Nota MT5: DEAL_POSITION_ID corrisponde a POSITION_IDENTIFIER (NON al ticket).
+    bool positionStillOpen = IsPositionOpenById(positionId);
+
+    // Alcuni ambienti popolano trans.position con il ticket della posizione: prova a risolvere l'identifier.
+    ulong altPositionId = 0;
+    if (trans.position != 0) {
+        if (PositionSelectByTicket((ulong)trans.position)) {
+            long ident = PositionGetInteger(POSITION_IDENTIFIER);
+            if (ident > 0) altPositionId = (ulong)ident;
+        }
+    }
+
+    if (positionStillOpen) {
+        snapFound = GetEntrySnapshot(positionId, snap);
+        if (!snapFound && altPositionId != 0 && altPositionId != positionId) {
+            snapFound = GetEntrySnapshot(altPositionId, snap);
+        }
+    } else {
+        snapFound = GetAndRemoveEntrySnapshot(positionId, snap);
+        if (!snapFound && altPositionId != 0 && altPositionId != positionId) {
+            snapFound = GetAndRemoveEntrySnapshot(altPositionId, snap);
+        }
+    }
+
+    if (snapFound) {
+        if (snap.openTime > 0) openTime = snap.openTime;
+        if (snap.executedPrice > 0) openPrice = snap.executedPrice;
+    }
     
     // Calcola durata trade
     int durationMinutes = (openTime > 0) ? (int)((closeTime - openTime) / 60) : 0;
@@ -8984,6 +9829,101 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
         closeReason = "TP";
     } else if (StringFind(comment, "TIME") >= 0 || StringFind(comment, "time") >= 0) {
         closeReason = "TIME_STOP";
+    }
+
+    // Score@Entry (snapshot preferito). Importante: su chiusure parziali NON consumare la mappa ticket->score.
+    double scoreAtEntry = 0.0;
+    if (snapFound && snap.scorePctAtEntry > 0.0) {
+        scoreAtEntry = snap.scorePctAtEntry;
+    } else {
+        if (positionStillOpen) {
+            double tmp = 0.0;
+            if (GetTradeScore(positionId, tmp)) {
+                scoreAtEntry = tmp;
+            }
+        } else {
+            scoreAtEntry = GetAndRemoveTradeScore(positionId);
+            if (scoreAtEntry <= 0.0 && openDealTicketFound != 0) {
+                scoreAtEntry = GetAndRemoveTradeScore(openDealTicketFound);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    //  SALVA RECORD ESTESO (persistente per export)
+    // ---------------------------------------------------------------
+    if (ExportExtendedTradesCSV) {
+        ExtendedTradeRecord rec;
+        rec.positionId = positionId;
+        rec.openTime = openTime;
+        rec.closeTime = closeTime;
+        // Direzione: priorita' allo snapshot (entry reale), altrimenti inferenza dalla chiusura
+        if (snapFound && (snap.direction == 1 || snap.direction == -1)) {
+            rec.direction = snap.direction;
+        } else {
+            // Fallback: SELL close tende a chiudere BUY; BUY close tende a chiudere SELL
+            rec.direction = (dealType == DEAL_TYPE_SELL) ? 1 : -1;
+        }
+        rec.symbol = _Symbol;
+        rec.volume = volume;
+        rec.requestedOpenPrice = snapFound ? snap.requestedPrice : openPrice;
+        rec.executedOpenPrice = snapFound ? snap.executedPrice : openPrice;
+        rec.openPrice = rec.executedOpenPrice;
+        rec.closePrice = closePrice;
+        rec.commission = commission;
+        rec.swap = swap;
+        rec.profit = profit;
+        rec.netProfit = netProfit;
+        rec.balanceAfter = AccountInfoDouble(ACCOUNT_BALANCE);
+        rec.durationMinutes = durationMinutes;
+        rec.magic = dealMagic;
+        rec.comment = comment;
+        rec.closeReason = closeReason;
+
+        rec.spreadPtsAtOpen = snapFound ? snap.spreadPtsAtOpen : 0.0;
+        rec.slippagePtsAtOpen = snapFound ? snap.slippagePtsAtOpen : 0.0;
+        rec.sl = snapFound ? snap.sl : 0.0;
+        rec.tp = snapFound ? snap.tp : 0.0;
+
+        rec.scorePctAtEntry = scoreAtEntry;
+        rec.thresholdBasePct = snapFound ? snap.thresholdBasePct : 0.0;
+        rec.thresholdEffPct = snapFound ? snap.thresholdEffPct : 0.0;
+        if (snapFound) {
+            rec.thresholdMethodId = snap.thresholdMethodId;
+        } else {
+            // Fallback (meno affidabile): stato corrente al momento della chiusura
+            if (!AutoScoreThreshold) rec.thresholdMethodId = 0;
+            else if (!g_scoreThresholdReady) rec.thresholdMethodId = 1;
+            else rec.thresholdMethodId = g_youdenReady ? 3 : 2;
+        }
+        rec.hurstSoftMult = snapFound ? snap.hurstSoftMult : 0.0;
+        rec.tfCoherenceMult = snapFound ? snap.tfCoherenceMult : 0.0;
+        rec.tfCoherenceConflicts = snapFound ? snap.tfCoherenceConflicts : 0;
+        rec.tfCoherenceSupports = snapFound ? snap.tfCoherenceSupports : 0;
+        rec.tfCoherenceBlocked = snapFound ? snap.tfCoherenceBlocked : 0;
+
+        rec.hurstTradeScore = snapFound ? snap.hurstTradeScore : 0.0;
+        rec.hurstTradeThreshold = snapFound ? snap.hurstTradeThreshold : 0.0;
+        rec.hurstReady = snapFound ? snap.hurstReady : 0;
+        rec.hurstAllowTrade = snapFound ? snap.hurstAllowTrade : 0;
+        rec.hurstGlobal = snapFound ? snap.hurstGlobal : 0.0;
+        rec.hurstComposite = snapFound ? snap.hurstComposite : 0.0;
+        rec.hurstCenter = snapFound ? snap.hurstCenter : 0.0;
+        rec.hurstStdev = snapFound ? snap.hurstStdev : 0.0;
+        rec.regimeM5 = snapFound ? snap.regimeM5 : 0;
+        rec.regimeH1 = snapFound ? snap.regimeH1 : 0;
+        rec.regimeH4 = snapFound ? snap.regimeH4 : 0;
+        rec.regimeD1 = snapFound ? snap.regimeD1 : 0;
+
+        AppendExtendedTrade(rec);
+
+        if (EnableLogs) {
+            PrintFormat("[EXT] Trade close captured #%I64u | net=%+.2f | snap=%s | partial=%s | reason=%s",
+                positionId, netProfit,
+                snapFound ? "YES" : "NO",
+                positionStillOpen ? "YES" : "NO",
+                closeReason);
+        }
     }
     
     // ---------------------------------------------------------------
@@ -9077,10 +10017,6 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
         currentEquity > 0 ? (netProfit / currentEquity * 100) : 0, currentEquity);
     
     // Score breakdown e regime
-    double scoreAtEntry = GetAndRemoveTradeScore(positionId);
-    if (scoreAtEntry <= 0.0 && openDealTicketFound != 0) {
-        scoreAtEntry = GetAndRemoveTradeScore(openDealTicketFound);
-    }
     if (scoreAtEntry > 0) {
         double thresholdAtEntry = g_scoreThresholdReady ? g_dynamicThreshold : ScoreThreshold;
         PrintFormat("Score@Entry: %.1f%% (soglia %.1f%%) | Regime H=%.3f (%s)",
