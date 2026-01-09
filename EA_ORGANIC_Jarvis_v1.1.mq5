@@ -293,6 +293,14 @@ input double TFCoherencePenaltyPct = 30.0;       // Penalita' max (soft): aument
 input bool   AutoScoreThreshold = true;         // Soglia automatica (true) o manuale (false)
 input double ScoreThreshold     = 50.0;         // Soglia manuale (50% = mediana) - solo se Auto=false
 
+input bool   EnableYoudenExpDecay = true;        // Se true: Youden pesa di piu' i trade recenti (decay esponenziale)
+input double YoudenHalfLifeTrades = 120.0;       // Half-life in numero trade (es: 120 => dopo 120 trade il peso dimezza). Piu alto = piu stabile
+input bool   EnableYoudenUseRMultiple = true;    // Se true: classifica win/loss usando R-multiple (profitPts/riskPts da SL) invece del solo NetProfit
+input double YoudenMinRMultiple = 0.0;           // Trade "positivo" se R >= questo valore (0=break-even). Se SL non disponibile, fallback su NetProfit>=0
+input int    YoudenMinWins = 15;                 // Guardrail: minimo win (classe positiva) per attivare Youden (0=off)
+input int    YoudenMinLosses = 15;               // Guardrail: minimo loss (classe negativa) per attivare Youden (0=off)
+input double YoudenSmoothingAlpha = 0.95;        // Smoothing soglia Youden: T = alpha*Tprev + (1-alpha)*Tnew (0=off). Piu alto = piu stabile
+
 input group "--- PERFORMANCE BACKTEST ---"
 input int    RecalcEveryBars    = 0;            // Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
 
@@ -1419,6 +1427,8 @@ struct TradeRecord {
     double closePrice;
     double volume;
     double profit;
+    double sl;                 // prezzo SL al momento dell'entry (se disponibile da snapshot)
+    double tp;                 // prezzo TP al momento dell'entry (se disponibile da snapshot)
     double slippage;
     double spreadAtOpen;
     double scoreAtEntry;       //  v1.1: Score % al momento dell'apertura (per Youden)
@@ -1593,6 +1603,23 @@ bool   g_youdenReady = false;             // True quando abbiamo abbastanza trad
 double g_youdenThreshold = 0.0;           // Soglia calcolata da Youden J
 double g_otsuThreshold = 0.0;             // Soglia calcolata da Otsu
 int    g_minTradesForYouden = 0;          // Minimo trade per passare a Youden (16)
+
+// Diagnostica readiness Youden (per log non ripetitivi e per evitare messaggi fuorvianti)
+enum ENUM_YOUDEN_REASON
+{
+    YOUDEN_OK = 0,
+    YOUDEN_NOT_ENOUGH_TRADES = 1,
+    YOUDEN_NOT_ENOUGH_VALID = 2,
+    YOUDEN_GUARDRAIL_WINS = 3,
+    YOUDEN_GUARDRAIL_LOSSES = 4,
+    YOUDEN_ONE_CLASS = 5,
+    YOUDEN_J_NOT_POSITIVE = 6
+};
+
+int g_youdenLastReason = YOUDEN_OK;
+int g_youdenLastValidCount = 0;
+int g_youdenLastPosCount = 0;
+int g_youdenLastNegCount = 0;
 
 // v1.1 FIX: Mappa ticket -> score per collegare correttamente score a trade
 // Problema: g_lastEntryScore veniva sovrascritto prima della chiusura trade
@@ -2147,10 +2174,13 @@ int OnInit()
     Print("SOGLIA ADATTIVA: OTSU -> YOUDEN (100% DATA-DRIVEN)");
     Print("---------------------------------------------------------------");
     PrintFormat("   Fase 1 (warm-up): OTSU - separazione bimodale score");
-    PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
+    if (EnableYoudenExpDecay && YoudenHalfLifeTrades > 0.0)
+        PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1) con exp-decay (half-life=%.1f trade)", g_minTradesForYouden, YoudenHalfLifeTrades);
+    else
+        PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
     double decayBounds = GetOrganicDecayPow(GetDefaultHurst(), 2.0);
     PrintFormat("   Bounds: P%.1f%% <-> P%.1f%% (data-driven da Hurst)", decayBounds * 100.0, (1.0 - decayBounds) * 100.0);
-    Print("   Tutti i parametri derivati da 2^H e dai dati");
+    Print("   Core data-driven da 2^H e dai dati (guardrail Youden configurabili per stabilita')");
     Print("---------------------------------------------------------------");
     
     // ---------------------------------------------------------------
@@ -3963,46 +3993,119 @@ double CalcOtsuThreshold()
 //| INPUT: g_recentTrades[] con scoreAtEntry e profit                |
 //| OUTPUT: soglia ottimale che massimizza J = TPR + TNR - 1         |
 //|                                                                  |
-//| True Positive = Trade aperto (score >= T) E profittevole         |
-//| True Negative = Trade NON aperto (score < T) E sarebbe perdita   |
-//| False Positive = Trade aperto E perdita                          |
-//| False Negative = Trade NON aperto E sarebbe profitto             |
+//| Nota: questa e' una stima "feedback" basata sui trade realmente eseguiti.
+//| True Positive = trade eseguito con score >= T e classificato positivo
+//| True Negative = trade eseguito con score < T e classificato negativo
+//| (Non osserviamo direttamente i "non-trade": questa e' una proxy utile per tarare la soglia.)
 //+------------------------------------------------------------------+
 double CalcYoudenThreshold()
 {
     int tradesMax = ArraySize(g_recentTrades);
-    if (g_recentTradesCount < g_minTradesForYouden || tradesMax <= 0) return 0.0;  // Non pronto
+    g_youdenLastReason = YOUDEN_OK;
+    g_youdenLastValidCount = 0;
+    g_youdenLastPosCount = 0;
+    g_youdenLastNegCount = 0;
+
+    if (g_recentTradesCount < g_minTradesForYouden || tradesMax <= 0) {
+        g_youdenLastReason = YOUDEN_NOT_ENOUGH_TRADES;
+        return 0.0;  // Non pronto
+    }
     
     // Raccogli tutti i trade con score valido
     double scores[];
     double profits[];
+    bool labelsPositive[];
     int validCount = 0;
     
     ArrayResize(scores, g_recentTradesCount);
     ArrayResize(profits, g_recentTradesCount);
+    ArrayResize(labelsPositive, g_recentTradesCount);
     
     for (int i = 0; i < g_recentTradesCount; i++) {
         int idx = (g_recentTradesIndex - g_recentTradesCount + i + tradesMax) % tradesMax;
         if (g_recentTrades[idx].scoreAtEntry > 0) {  // Score valido
             scores[validCount] = g_recentTrades[idx].scoreAtEntry;
-            profits[validCount] = g_recentTrades[idx].profit;
+            profits[validCount] = g_recentTrades[idx].profit; // qui e' NET P/L
+
+            // Label win/loss per Youden:
+            // - default: NetProfit >= 0
+            // - opzionale: R-multiple (profitPts / riskPts da SL), per rendere confrontabili uscite a tempo vs a punti
+            bool isPos = (profits[validCount] >= 0.0);
+            if (EnableYoudenUseRMultiple) {
+                double slPrice = g_recentTrades[idx].sl;
+                double op = g_recentTrades[idx].openPrice;
+                double cp = g_recentTrades[idx].closePrice;
+
+                if (slPrice > 0.0 && op > 0.0 && cp > 0.0 && _Point > 0.0) {
+                    double riskPts = MathAbs(op - slPrice) / _Point;
+                    if (riskPts > 0.0) {
+                        double profitPts = 0.0;
+                        if (g_recentTrades[idx].type == POSITION_TYPE_BUY)
+                            profitPts = (cp - op) / _Point;
+                        else
+                            profitPts = (op - cp) / _Point;
+
+                        double r = profitPts / riskPts;
+                        // Importante: mantieni il vincolo su NetProfit>=0 (costi inclusi) per evitare falsi "win"
+                        // dovuti a piccole variazioni di prezzo che non coprono commission/spread/swap.
+                        isPos = ((profits[validCount] >= 0.0) && (r >= YoudenMinRMultiple));
+                    }
+                }
+            }
+            labelsPositive[validCount] = isPos;
             validCount++;
         }
     }
     
-    if (validCount < g_minTradesForYouden) return 0.0;
-    
-    // Conta trade vincenti e perdenti per calcolo Youden
-    int totalPositives = 0;   // Trade profittevoli (dovremmo entrare)
-    int totalNegatives = 0;   // Trade in perdita (non dovremmo entrare)
-    
-    for (int i = 0; i < validCount; i++) {
-        if (profits[i] >= 0) totalPositives++;
-        else totalNegatives++;
+    g_youdenLastValidCount = validCount;
+    if (validCount < g_minTradesForYouden) {
+        g_youdenLastReason = YOUDEN_NOT_ENOUGH_VALID;
+        return 0.0;
     }
     
-    // Se tutti vincenti o tutti perdenti, Youden non applicabile
-    if (totalPositives == 0 || totalNegatives == 0) return 0.0;
+    // Guardrail classi (conta grezza)
+    int posCountRaw = 0;
+    int negCountRaw = 0;
+    for (int i = 0; i < validCount; i++) {
+        if (labelsPositive[i]) posCountRaw++;
+        else negCountRaw++;
+    }
+    g_youdenLastPosCount = posCountRaw;
+    g_youdenLastNegCount = negCountRaw;
+    if (YoudenMinWins > 0 && posCountRaw < YoudenMinWins) {
+        g_youdenLastReason = YOUDEN_GUARDRAIL_WINS;
+        return 0.0;
+    }
+    if (YoudenMinLosses > 0 && negCountRaw < YoudenMinLosses) {
+        g_youdenLastReason = YOUDEN_GUARDRAIL_LOSSES;
+        return 0.0;
+    }
+
+    // Pesi per recency (opzionale): weight=0.5^(age/halfLife)
+    // Nota: l'array e' in ordine temporale (piu vecchio -> piu recente).
+    bool useExpDecay = (EnableYoudenExpDecay && YoudenHalfLifeTrades > 0.0);
+    double weights[];
+    ArrayResize(weights, validCount);
+
+    double totalPosW = 0.0;  // somma pesi trade profittevoli
+    double totalNegW = 0.0;  // somma pesi trade in perdita
+
+    for (int i = 0; i < validCount; i++) {
+        double w = 1.0;
+        if (useExpDecay) {
+            int ageTrades = (validCount - 1) - i;  // 0 = trade piu recente
+            w = MathPow(0.5, (double)ageTrades / YoudenHalfLifeTrades);
+        }
+        weights[i] = w;
+        if (labelsPositive[i]) totalPosW += w;
+        else totalNegW += w;
+    }
+
+    // Se tutte win o tutte loss, Youden non applicabile
+    if (totalPosW <= 0.0 || totalNegW <= 0.0) {
+        g_youdenLastReason = YOUDEN_ONE_CLASS;
+        return 0.0;
+    }
     
     // Trova soglia che massimizza J = TPR + TNR - 1
     double maxJ = -1.0;
@@ -4024,27 +4127,28 @@ double CalcYoudenThreshold()
     
     // Testa soglie nel range data-driven
     for (double threshold = minScoreTest; threshold <= maxScoreTest; threshold += stepSize) {
-        
-        // Calcola TP, TN, FP, FN per questa soglia
-        int TP = 0;  // Score >= T e profitto (corretto entrare)
-        int FN = 0;  // Score < T e profitto (sbagliato non entrare)
-        int TN = 0;  // Score < T e perdita (corretto non entrare)
-        int FP = 0;  // Score >= T e perdita (sbagliato entrare)
-        
+
+        // Calcola TP, TN, FP, FN (pesati) per questa soglia
+        double TPw = 0.0;  // Score >= T e profitto (corretto entrare)
+        double FNw = 0.0;  // Score < T e profitto (sbagliato non entrare)
+        double TNw = 0.0;  // Score < T e perdita (corretto non entrare)
+        double FPw = 0.0;  // Score >= T e perdita (sbagliato entrare)
+
         for (int i = 0; i < validCount; i++) {
             bool wouldEnter = (scores[i] >= threshold);
-            bool isProfitable = (profits[i] >= 0);
-            
-            if (wouldEnter && isProfitable) TP++;
-            else if (wouldEnter && !isProfitable) FP++;
-            else if (!wouldEnter && isProfitable) FN++;
-            else TN++;  // !wouldEnter && !isProfitable
+            bool isProfitable = labelsPositive[i];
+            double w = weights[i];
+
+            if (wouldEnter && isProfitable) TPw += w;
+            else if (wouldEnter && !isProfitable) FPw += w;
+            else if (!wouldEnter && isProfitable) FNw += w;
+            else TNw += w;  // !wouldEnter && !isProfitable
         }
-        
+
         // TPR = TP / (TP + FN) = Sensitivity (quanti profitti catturiamo)
         // TNR = TN / (TN + FP) = Specificity (quante perdite evitiamo)
-        double TPR = (totalPositives > 0) ? (double)TP / totalPositives : 0.0;
-        double TNR = (totalNegatives > 0) ? (double)TN / totalNegatives : 0.0;
+        double TPR = (totalPosW > 0.0) ? TPw / totalPosW : 0.0;
+        double TNR = (totalNegW > 0.0) ? TNw / totalNegW : 0.0;
         
         double J = TPR + TNR - 1.0;  // Youden's J: [-1, +1], 0 = random
         
@@ -4057,12 +4161,20 @@ double CalcYoudenThreshold()
     // Log se J  significativo (soglia da Hurst: decay  0.25 per H=0.5)
     double jLogThreshold = GetOrganicDecayPow(g_hurstGlobal, 2.0);  // decay(H) - J deve essere almeno questo per essere "significativo"
     if (g_enableLogsEffective && maxJ > jLogThreshold) {
-        PrintFormat("[YOUDEN] J=%.3f | Soglia ottimale: %.1f%% | Trades analizzati: %d (W:%d L:%d)",
-            maxJ, optimalThreshold, validCount, totalPositives, totalNegatives);
+        string wStr = useExpDecay ? StringFormat("expDecay halfLife=%.1f", YoudenHalfLifeTrades) : "noDecay";
+        string yStr = EnableYoudenUseRMultiple ? StringFormat("Net>=0 && R>=%.2f", YoudenMinRMultiple) : "NetProfit>=0";
+        PrintFormat("[YOUDEN] J=%.3f | Soglia ottimale: %.1f%% | Trades: %d (W:%d L:%d) | %s | target=%s",
+            maxJ, optimalThreshold, validCount, posCountRaw, negCountRaw, wStr, yStr);
     }
     
     // Solo se J > 0 (meglio di random), altrimenti ritorna 0
-    return (maxJ > 0) ? optimalThreshold : 0.0;
+    if (maxJ > 0) {
+        g_youdenLastReason = YOUDEN_OK;
+        return optimalThreshold;
+    }
+
+    g_youdenLastReason = YOUDEN_J_NOT_POSITIVE;
+    return 0.0;
 }
 
 //+------------------------------------------------------------------+
@@ -4073,6 +4185,7 @@ double CalcYoudenThreshold()
 //+------------------------------------------------------------------+
 void UpdateDynamicThreshold()
 {
+    static int s_lastYoudenReasonLogged = -999;
     if (!AutoScoreThreshold) {
         // Soglia manuale: usa valore impostato dall'utente
         g_dynamicThreshold = ScoreThreshold;
@@ -4125,20 +4238,54 @@ void UpdateDynamicThreshold()
         
         if (youdenResult > 0) {
             // Youden ha trovato una soglia valida (J > 0)
-            g_youdenThreshold = youdenResult;
+            if (YoudenSmoothingAlpha > 0.0 && YoudenSmoothingAlpha < 1.0 && g_youdenReady && g_youdenThreshold > 0.0)
+                g_youdenThreshold = (YoudenSmoothingAlpha * g_youdenThreshold) + ((1.0 - YoudenSmoothingAlpha) * youdenResult);
+            else
+                g_youdenThreshold = youdenResult;
             g_youdenReady = true;
             g_dynamicThreshold = g_youdenThreshold;
-            thresholdMethod = StringFormat("YOUDEN (J>0) basato su %d trade", tradesWithScore);
+            s_lastYoudenReasonLogged = YOUDEN_OK;
+            thresholdMethod = StringFormat("YOUDEN (J>0) su %d trade%s%s",
+                tradesWithScore,
+                (EnableYoudenExpDecay && YoudenHalfLifeTrades > 0.0) ? StringFormat(" | expDecay HL=%.0f", YoudenHalfLifeTrades) : "",
+                EnableYoudenUseRMultiple ? StringFormat(" | target R>=%.2f", YoudenMinRMultiple) : "");
         } else {
-            // Youden non trova separazione (J <= 0): usa Otsu
+            // Youden non pronto (guardrail/insufficiente) oppure non trova separazione (J <= 0): usa Otsu
             g_youdenReady = false;
             g_dynamicThreshold = g_otsuThreshold;
-            thresholdMethod = StringFormat("OTSU (Youden J<=0, %d trade)", tradesWithScore);
+
+            // Log non ripetitivo: solo quando cambia il motivo (specialmente per guardrail)
+            if (g_enableLogsEffective && (g_youdenLastReason == YOUDEN_GUARDRAIL_WINS || g_youdenLastReason == YOUDEN_GUARDRAIL_LOSSES)) {
+                if (s_lastYoudenReasonLogged != g_youdenLastReason) {
+                    PrintFormat("[THRESHOLD] Youden non pronto (guardrail): W %d/%d | L %d/%d | uso OTSU=%.1f%%",
+                        g_youdenLastPosCount, YoudenMinWins,
+                        g_youdenLastNegCount, YoudenMinLosses,
+                        g_otsuThreshold);
+                    s_lastYoudenReasonLogged = g_youdenLastReason;
+                }
+            } else {
+                // Se il motivo non e' guardrail, allinea lo stato loggato (evita spam)
+                if (g_youdenLastReason != s_lastYoudenReasonLogged)
+                    s_lastYoudenReasonLogged = g_youdenLastReason;
+            }
+
+            if (g_youdenLastReason == YOUDEN_GUARDRAIL_WINS) {
+                thresholdMethod = StringFormat("OTSU (Youden guardrail: W %d/%d)", g_youdenLastPosCount, YoudenMinWins);
+            } else if (g_youdenLastReason == YOUDEN_GUARDRAIL_LOSSES) {
+                thresholdMethod = StringFormat("OTSU (Youden guardrail: L %d/%d)", g_youdenLastNegCount, YoudenMinLosses);
+            } else if (g_youdenLastReason == YOUDEN_ONE_CLASS) {
+                thresholdMethod = StringFormat("OTSU (Youden non applicabile: classe unica, %d trade)", tradesWithScore);
+            } else if (g_youdenLastReason == YOUDEN_NOT_ENOUGH_VALID) {
+                thresholdMethod = StringFormat("OTSU (Youden non pronto: valid %d/%d)", g_youdenLastValidCount, g_minTradesForYouden);
+            } else {
+                thresholdMethod = StringFormat("OTSU (Youden J<=0, %d trade)", tradesWithScore);
+            }
         }
     } else {
         // Non abbastanza trade: usa Otsu
         g_youdenReady = false;
         g_dynamicThreshold = g_otsuThreshold;
+        s_lastYoudenReasonLogged = YOUDEN_NOT_ENOUGH_TRADES;
         thresholdMethod = StringFormat("OTSU (attesa %d/%d trade per Youden)", tradesWithScore, g_minTradesForYouden);
     }
     
@@ -10054,6 +10201,8 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
         g_recentTrades[g_recentTradesIndex].closePrice = closePrice;
         g_recentTrades[g_recentTradesIndex].volume = volume;
         g_recentTrades[g_recentTradesIndex].profit = netProfit;
+        g_recentTrades[g_recentTradesIndex].sl = snapFound ? snap.sl : 0.0;
+        g_recentTrades[g_recentTradesIndex].tp = snapFound ? snap.tp : 0.0;
         g_recentTrades[g_recentTradesIndex].closeReason = closeReason;
         
         //  v1.1 FIX: Recupera score CORRETTO dalla mappa ticket  score

@@ -750,6 +750,29 @@ Nella v1.1 la soglia automatica segue una logica a due fasi (concetto):
 1) **Warmup (Otsu)**: separa score "bassi" e "alti" massimizzando la separazione tra gruppi.
 2) **Feedback (Youden)**: dopo abbastanza trade, ottimizza una metrica tipo Youden per distinguere trade buoni e cattivi.
 
+Nota (v1.1 aggiornato): Youden puo' usare un **decay esponenziale** sui trade (pesi maggiori ai trade piu recenti) tramite una half-life in numero di trade. Questo aumenta la reattivita' ai cambi di regime mantenendo stabilita'.
+
+Nota (v1.1 aggiornato, non superficiale): per gestire bene il fatto che alcune uscite sono a **punti** (SL/TP) e altre a **tempo** (TIME_STOP), Youden puo' classificare "trade buono/cattivo" non solo con `NetProfit>=0`, ma anche tramite un criterio **R-multiple** rispetto allo SL all'entry:
+
+$$
+R = \frac{profitPts}{riskPts}\quad\text{con}\quad riskPts = \frac{|openPrice-SL|}{Point}
+$$
+
+In questo modo un TIME_STOP viene valutato in modo coerente rispetto al rischio iniziale. Se lo SL non e' disponibile, l'EA fa fallback a `NetProfit>=0`.
+
+#### Parametri Youden (v1.1)
+
+Questi input servono a bilanciare il principio: **reattivo sul regime, stabile nella decisione**.
+
+- `EnableYoudenExpDecay` (default: `true`): abilita il peso maggiore ai trade recenti.
+- `YoudenHalfLifeTrades` (default: `120`): half-life in numero di trade. Piu' alto = piu' stabile; piu' basso = piu' reattivo.
+- `EnableYoudenUseRMultiple` (default: `true`): classifica trade buono/cattivo con criterio R-multiple (se SL disponibile).
+- `YoudenMinRMultiple` (default: `0.0`): soglia minima su $R$. Nota: quando e' attivo R-multiple, il trade e' positivo solo se **`NetProfit>=0`** e **`R>=YoudenMinRMultiple`** (costi inclusi).
+- `YoudenMinWins` / `YoudenMinLosses` (default: `15`/`15`): guardrail per attivare Youden; se non rispettati l'EA resta su Otsu.
+- `YoudenSmoothingAlpha` (default: `0.95`): smoothing della soglia Youden per evitare oscillazioni (0=off).
+
+Nota operativa: se Youden e' bloccato dai guardrail (es. poche win o poche loss), l'EA logga una riga non ripetitiva e mantiene la soglia Otsu.
+
 Indice di Youden (alto livello):
 
 $$
