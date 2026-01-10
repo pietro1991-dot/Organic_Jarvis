@@ -259,6 +259,42 @@ input double YoudenSmoothingAlpha = 0.95;        // Smoothing soglia Youden: T =
 input group "--- PERFORMANCE BACKTEST ---"
 input int    RecalcEveryBars    = 0;            // Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
 
+// +---------------------------------------------------------------------------+
+// |                  GUARDRAILS / DEFAULTS (configurabili)                     |
+// | Obiettivo: nessun parametro di scala/clamp hardcoded nella logica.         |
+// +---------------------------------------------------------------------------+
+input group "--- GUARDRAILS / DEFAULTS ---"
+input double DataDrivenRatioMin          = 0.5;      // Clamp minimo ratio (refPeriod/basePeriod)
+input double DataDrivenRatioMax          = 3.0;      // Clamp massimo ratio (refPeriod/basePeriod)
+input int    DataDrivenBufferMin         = 4;        // Clamp minimo buffer size
+input int    DataDrivenBufferMax         = 4096;     // Clamp massimo buffer size
+input int    BufferXLargeMin             = 128;      // Minimo assoluto per GetBufferXLarge()
+input double NumericEpsilon              = 1e-6;     // Epsilon numerico per evitare /0
+input double PercentileLow               = 25.0;     // Percentile low (es: P25) usato come guardrail robusto
+input double PercentileHigh              = 75.0;     // Percentile high (es: P75) usato come guardrail robusto
+input double IQRLogChangeFrac            = 0.10;     // Frazione IQR per soglia anti-spam nei log (threshold change)
+input double YoudenStepSizeFallback      = 0.1;      // Fallback step-size se range nullo/degenerato
+input int    YoudenTargetTestsMin        = 8;        // Minimo numero di test per ricerca soglia Youden
+input double YoudenTargetTestsScale      = 4.0;      // Scala per targetTests (sqrt(trades)*scale)
+input double TrimPercentDefault          = 0.10;     // Default trimmed-mean (se non passato)
+input double ObvAbsEpsilon               = 1e-10;    // Epsilon per evitare /0 in OBV normalization
+input double ObvMinChangeFallback        = 0.0025;   // Fallback minChange per OBV divergence se dati insufficienti
+input double AdxFlatRangeThreshold       = 0.1;      // Range minimo per considerare ADX non-flat
+input double AdxStddevFallbackFrac       = 0.1;      // Se stddev=0: usa frac*avg come pseudo-stddev
+input double AdxStddevAbsMin             = 1.0;      // Fallback assoluto per stddev ADX
+input double AdxP75MinDelta              = 1.0;      // Delta minimo per garantire p75 > p25 (ADX)
+input double BollingerDeviationDefault   = 2.0;      // Default BB deviation (se non stimata)
+input double PSARStepMin                 = 0.01;     // Clamp minimo step PSAR
+input double PSARStepMax                 = 0.10;     // Clamp massimo step PSAR
+input double PSARMaxMin                  = 0.10;     // Clamp minimo max PSAR
+input double PSARMaxMax                  = 0.40;     // Clamp massimo max PSAR
+input double PointFallbackNonJPY         = 0.00001;  // Fallback point se SymbolInfoDouble fallisce (non-JPY)
+input double PointFallbackJPYLike        = 0.01;     // Fallback point per simboli JPY/XAU se SymbolInfoDouble fallisce
+input double ATRScaleAbsMin              = 0.00001;  // Minimo assoluto per scale (fallback finale)
+input double EarlyExitAtrPipsFallback    = 10.0;     // Fallback ATR pips se ATR non disponibile
+input double EarlyExitMinLossPipsFloor   = 5.0;      // Min loss pips per early-exit
+input double EarlyExitMinLossAtrFrac     = 0.5;      // Min loss = max(floor, frac*ATRpips)
+
 
 //  FUNZIONE: Calcola buffer size 100% auto-driven
 // Restituisce: basePeriod * f(ratio, exponent)
@@ -270,15 +306,15 @@ int GetDataDrivenBufferSize(int basePeriod, int exponent)
     double ratio = (double)refPeriod / denom;
 
     // Clamp prudente per evitare esplosioni quando i periodi non sono ancora stabili
-    ratio = MathMax(0.5, MathMin(3.0, ratio));
+    ratio = MathMax(DataDrivenRatioMin, MathMin(DataDrivenRatioMax, ratio));
 
     // Exponent: 0 -> 1, 1 -> sqrt(ratio), 2 -> ratio, 3 -> ratio^(1.5), 4 -> ratio^2
     double factor = MathPow(ratio, 0.5 * (double)exponent);
     double size = (double)basePeriod * factor;
 
     int out = (int)MathRound(size);
-    out = MathMax(4, out);
-    out = MathMin(out, 4096);
+    out = MathMax(DataDrivenBufferMin, out);
+    out = MathMin(out, DataDrivenBufferMax);
     return out;
 }
 
@@ -308,7 +344,7 @@ int GetBufferXLarge()
 { 
     int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : BOOTSTRAP_MIN_BARS;
     int result = GetDataDrivenBufferSize(base, 2);
-    return MathMax(result, 128);  // Minimo 128 barre per calcoli robusti
+    return MathMax(result, BufferXLargeMin);  // Minimo configurabile per calcoli robusti
 }
 
 int GetBufferHuge()    
@@ -1278,16 +1314,15 @@ int OnInit()
     
     // CACHE COSTANTI SIMBOLO (evita chiamate API ripetute)
     g_pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    // Fallback basato su convenzione mercato (dati empirici)
-    // Forex standard: 0.00001 (5 decimali), JPY/XAU: 0.01 (2-3 decimali)
+    // Fallback basato su convenzione mercato (configurabile via input)
     if (g_pointValue <= 0) {
         // Determina se coppia JPY-like dal nome simbolo
         string upperSymbol = _Symbol;
         StringToUpper(upperSymbol);
         if (StringFind(upperSymbol, "JPY") >= 0 || StringFind(upperSymbol, "XAU") >= 0) {
-            g_pointValue = 0.01;  // Coppie JPY o Oro: point tipico 0.01
+            g_pointValue = PointFallbackJPYLike;
         } else {
-            g_pointValue = 0.00001;  // Forex standard: 5 decimali
+            g_pointValue = PointFallbackNonJPY;
         }
     }
     
@@ -1941,11 +1976,11 @@ void SetTimeFrameArraysNonSeries(TimeFrameData &data)
 double CalcOtsuThreshold()
 {
     // Minimo campioni: empirico (buffer piccolo) - no H-based sizing
-    int minSamples = MathMax(4, GetBufferSmall());
+    int minSamples = MathMax(DataDrivenBufferMin, GetBufferSmall());
     if (g_scoreHistorySize < minSamples) {
         // Fallback: percentile P25 dei dati esistenti
         if (g_scoreHistorySize > 0) {
-            return CalculatePercentile(g_scoreHistory, g_scoreHistorySize, 25.0);
+            return CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileLow);
         }
         return ScoreThreshold;  // Ultimo fallback: input utente
     }
@@ -2121,18 +2156,18 @@ double CalcYoudenThreshold()
     double maxJ = -1.0;
     
     // Range test 100% data-driven: quartili empirici della distribuzione score
-    double minScoreTest = CalculatePercentile(scores, validCount, 25.0);
-    double maxScoreTest = CalculatePercentile(scores, validCount, 75.0);
+    double minScoreTest = CalculatePercentile(scores, validCount, PercentileLow);
+    double maxScoreTest = CalculatePercentile(scores, validCount, PercentileHigh);
 
     // Fallback iniziale = mediana (robusta, data-driven)
     double optimalThreshold = CalculatePercentile(scores, validCount, 50.0);
 
     // Step size auto-driven: piu trade => piu step (fino al limite buffer)
-    int targetTests = MathMax(GetBufferSmall(), (int)MathRound(MathSqrt((double)validCount) * 4.0));
-    if (targetTests < 8) targetTests = 8;
+    int targetTests = MathMax(GetBufferSmall(), (int)MathRound(MathSqrt((double)validCount) * YoudenTargetTestsScale));
+    if (targetTests < YoudenTargetTestsMin) targetTests = YoudenTargetTestsMin;
     double range = (maxScoreTest - minScoreTest);
     double stepSize = (targetTests > 0) ? (range / (double)targetTests) : range;
-    if (stepSize <= 0.0) stepSize = 0.1;
+    if (stepSize <= 0.0) stepSize = YoudenStepSizeFallback;
     
     // Testa soglie nel range data-driven
     for (double threshold = minScoreTest; threshold <= maxScoreTest; threshold += stepSize) {
@@ -2309,8 +2344,8 @@ void UpdateDynamicThreshold()
     int minSamplesForBounds = GetBufferSmall();  // 8 campioni minimi
     if (g_scoreHistorySize >= minSamplesForBounds) {
         // Percentili empirici (auto-driven): clamp in [P25, P75]
-        double minBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, 25.0);
-        double maxBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, 75.0);
+        double minBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileLow);
+        double maxBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileHigh);
         
         bool hitFloor = (g_dynamicThreshold < minBound);
         bool hitCeiling = (g_dynamicThreshold > maxBound);
@@ -2325,12 +2360,12 @@ void UpdateDynamicThreshold()
     // Log se cambio significativo (anti-spam): usa una frazione dell'IQR (P75-P25)
     double logChangeThreshold = 0.0;
     if (g_scoreHistorySize >= minSamplesForBounds) {
-        double p25 = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, 25.0);
-        double p75 = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, 75.0);
+        double p25 = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileLow);
+        double p75 = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileHigh);
         double iqr = MathAbs(p75 - p25);
-        logChangeThreshold = MathMax(1e-6, iqr * 0.10);
+        logChangeThreshold = MathMax(NumericEpsilon, iqr * IQRLogChangeFrac);
     } else {
-        logChangeThreshold = 1e-6;
+        logChangeThreshold = NumericEpsilon;
     }
     if (g_enableLogsEffective && MathAbs(g_dynamicThreshold - oldThreshold) > logChangeThreshold) {
         PrintFormat("[THRESHOLD %s] Soglia: %.1f%% -> %.1f%% [%s]",
@@ -2723,10 +2758,10 @@ int UpdateRSIDivergence()
             // Normalizza 100% auto-driven: strength = raw / P75(raw)
             double p75 = 0.0;
             if (s_rsiDivRawSize >= GetBufferSmall()) {
-                p75 = CalculatePercentile(s_rsiDivRawHist, s_rsiDivRawSize, 75.0);
+                p75 = CalculatePercentile(s_rsiDivRawHist, s_rsiDivRawSize, PercentileHigh);
             }
             if (p75 <= 0.0) p75 = rawMetric;
-            if (p75 <= 0.0) p75 = 1e-6;
+            if (p75 <= 0.0) p75 = NumericEpsilon;
             calcStrength = MathMin(1.0, rawMetric / p75);
 
             // Aggiorna history raw (circular)
@@ -2760,10 +2795,10 @@ int UpdateRSIDivergence()
 
             double p75 = 0.0;
             if (s_rsiDivRawSize >= GetBufferSmall()) {
-                p75 = CalculatePercentile(s_rsiDivRawHist, s_rsiDivRawSize, 75.0);
+                p75 = CalculatePercentile(s_rsiDivRawHist, s_rsiDivRawSize, PercentileHigh);
             }
             if (p75 <= 0.0) p75 = rawMetric;
-            if (p75 <= 0.0) p75 = 1e-6;
+            if (p75 <= 0.0) p75 = NumericEpsilon;
             calcStrength = MathMin(1.0, rawMetric / p75);
 
             s_rsiDivRawHist[s_rsiDivRawIdx] = rawMetric;
@@ -2791,8 +2826,7 @@ int UpdateRSIDivergence()
 //+------------------------------------------------------------------+
 //| STOCHASTIC EXTREME DETECTION                                     |
 //| Rileva zone ipercomprato/ipervenduto usando soglie percentili    |
-//| Soglia ipervenduto: < P25 * 100 ~ 25%                            |
-//| Soglia ipercomprato: > P75 * 100 ~ 75%                           |
+//| Soglie: percentili empirici (low/high) su Stoch K recente        |
 //| Ritorna: +1 = bullish (ipervenduto), -1 = bearish (ipercomprato)|
 //+------------------------------------------------------------------+
 int UpdateStochasticExtreme()
@@ -2820,7 +2854,7 @@ int UpdateStochasticExtreme()
     double oversoldLevel = 0.0;
     double overboughtLevel = 0.0;
     double stochVals[];
-    int maxLookback = MathMin(count, GetBufferXLarge());  // buffer di riferimento (64)
+    int maxLookback = MathMin(count, GetBufferXLarge());  // buffer di riferimento (data-driven)
     ArrayResize(stochVals, maxLookback);
     int valid = 0;
     for (int i = 0; i < maxLookback; i++) {
@@ -2834,17 +2868,17 @@ int UpdateStochasticExtreme()
     }
     int minSamples = GetBufferSmall();  // 8
     if (valid >= minSamples) {
-        oversoldLevel = CalculatePercentile(stochVals, valid, 25.0);
-        overboughtLevel = CalculatePercentile(stochVals, valid, 75.0);
+        oversoldLevel = CalculatePercentile(stochVals, valid, PercentileLow);
+        overboughtLevel = CalculatePercentile(stochVals, valid, PercentileHigh);
     } else {
         // Fallback empirico se dati insufficienti
-        oversoldLevel = 25.0;
-        overboughtLevel = 75.0;
+        oversoldLevel = PercentileLow;
+        overboughtLevel = PercentileHigh;
     }
     
     // Forza = quanto e' "estremo" rispetto alla soglia
-    // Per ipervenduto: quanto e' sotto 23.6%
-    // Per ipercomprato: quanto e' sopra 76.4%
+    // Per ipervenduto: quanto e' sotto la soglia
+    // Per ipercomprato: quanto e' sopra la soglia
     
     if (stochK < oversoldLevel && stochD < oversoldLevel) {
         // IPERVENDUTO -> potenziale inversione bullish
@@ -2915,7 +2949,7 @@ int UpdateOBVDivergence()
     double obvPrev = tfData_H1.obv[lastIdx - lookback];
     
     // Evita divisione per zero
-    if (MathAbs(obvPrev) < 1e-10) return 0;
+    if (MathAbs(obvPrev) < ObvAbsEpsilon) return 0;
     
     double obvChange = (obvNow - obvPrev) / MathAbs(obvPrev);
     
@@ -2932,7 +2966,7 @@ int UpdateOBVDivergence()
         if (idxPrev < 0) break;
         double pc = (tfData_H1.rates[idxNow].close - tfData_H1.rates[idxPrev].close) / tfData_H1.rates[idxPrev].close;
         double op = tfData_H1.obv[idxPrev];
-        if (MathAbs(op) < 1e-10) continue;
+        if (MathAbs(op) < ObvAbsEpsilon) continue;
         double oc = (tfData_H1.obv[idxNow] - op) / MathAbs(op);
         absPriceHist[v] = MathAbs(pc);
         absObvHist[v] = MathAbs(oc);
@@ -2940,11 +2974,11 @@ int UpdateOBVDivergence()
     }
     double minChange = 0.0;
     if (v >= GetBufferSmall()) {
-        double p25p = CalculatePercentile(absPriceHist, v, 25.0);
-        double p25o = CalculatePercentile(absObvHist, v, 25.0);
+        double p25p = CalculatePercentile(absPriceHist, v, PercentileLow);
+        double p25o = CalculatePercentile(absObvHist, v, PercentileLow);
         minChange = MathMax(p25p, p25o);
     }
-    if (minChange <= 0.0) minChange = 0.0025; // fallback solo se dati insufficienti
+    if (minChange <= 0.0) minChange = ObvMinChangeFallback; // fallback solo se dati insufficienti
     
     if (MathAbs(priceChange) < minChange || MathAbs(obvChange) < minChange) return 0;
     
@@ -2968,10 +3002,10 @@ int UpdateOBVDivergence()
         double rawMetric = MathMax(0.0, priceChange - obvChange);
         double p75 = 0.0;
         if (s_obvDivRawSize >= GetBufferSmall()) {
-            p75 = CalculatePercentile(s_obvDivRawHist, s_obvDivRawSize, 75.0);
+            p75 = CalculatePercentile(s_obvDivRawHist, s_obvDivRawSize, PercentileHigh);
         }
         if (p75 <= 0.0) p75 = rawMetric;
-        if (p75 <= 0.0) p75 = 1e-6;
+        if (p75 <= 0.0) p75 = NumericEpsilon;
         g_obvDivergenceStrength = MathMin(1.0, rawMetric / p75);
 
         s_obvDivRawHist[s_obvDivRawIdx] = rawMetric;
@@ -2991,10 +3025,10 @@ int UpdateOBVDivergence()
         double rawMetric = MathMax(0.0, obvChange - priceChange);
         double p75 = 0.0;
         if (s_obvDivRawSize >= GetBufferSmall()) {
-            p75 = CalculatePercentile(s_obvDivRawHist, s_obvDivRawSize, 75.0);
+            p75 = CalculatePercentile(s_obvDivRawHist, s_obvDivRawSize, PercentileHigh);
         }
         if (p75 <= 0.0) p75 = rawMetric;
-        if (p75 <= 0.0) p75 = 1e-6;
+        if (p75 <= 0.0) p75 = NumericEpsilon;
         g_obvDivergenceStrength = MathMin(1.0, rawMetric / p75);
 
         s_obvDivRawHist[s_obvDivRawIdx] = rawMetric;
@@ -3060,10 +3094,10 @@ int GetReversalSignal(double &strength, bool updateHistory = true)
         double absM = MathAbs(g_scoreMomentum);
         double p75M = 0.0;
         if (g_momentumHistorySize >= GetBufferSmall()) {
-            p75M = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, 75.0);
+            p75M = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, PercentileHigh);
         }
         if (p75M <= 0.0) p75M = absM;
-        if (p75M <= 0.0) p75M = 1e-6;
+        if (p75M <= 0.0) p75M = NumericEpsilon;
         double momStrength = MathMin(1.0, absM / p75M);
 
         score += momentumSignal * momStrength;
@@ -3152,15 +3186,14 @@ int GetReversalSignal(double &strength, bool updateHistory = true)
         int direction = (score > 0) ? 1 : -1;
         
         if (g_enableLogsEffective) {
-            PrintFormat("[REVERSAL] INVERSIONE %s | Forza: %.0f%% > Soglia: %.0f%% | RSI=%s OBV=%s Stoch=%s M=%s R=%s",
+            PrintFormat("[REVERSAL] INVERSIONE %s | Forza: %.0f%% > Soglia: %.0f%% | RSI=%s OBV=%s Stoch=%s M=%s",
                 direction > 0 ? "BULLISH" : "BEARISH",
                 strength * 100,
                 g_reversalThreshold * 100,
                 divergenceSignal > 0 ? "BUY" : (divergenceSignal < 0 ? "SELL" : "NEUTRO"),
                 obvDivergenceSignal > 0 ? "BUY" : (obvDivergenceSignal < 0 ? "SELL" : "NEUTRO"),
                 stochExtremeSignal > 0 ? "BUY" : (stochExtremeSignal < 0 ? "SELL" : "NEUTRO"),
-                momentumStrong ? (momentumSignal > 0 ? "BUY" : "SELL") : "NEUTRO",
-                regimeSignal > 0 ? "BUY" : (regimeSignal < 0 ? "SELL" : "NEUTRO"));
+                momentumStrong ? (momentumSignal > 0 ? "BUY" : "SELL") : "NEUTRO");
         }
         
         return direction;
@@ -3327,7 +3360,7 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
 
     double threshold = 0.0;
     if (posCount >= GetBufferSmall()) {
-        threshold = CalculatePercentile(autocorrPos, posCount, 25.0);
+        threshold = CalculatePercentile(autocorrPos, posCount, PercentileLow);
     }
 
     for (int lag = 1; lag <= maxLagEffective; lag++) {
@@ -3491,7 +3524,7 @@ double CalculateMedian(const double &arr[], int size)
 
 //+------------------------------------------------------------------+
 //| CALCOLA MEDIA TRONCATA (Trimmed Mean)                            |
-//| Scarta il 10% estremi - ideale per regime MEAN-REVERTING         |
+//| Scarta una frazione degli estremi (trim) - robusto su outlier    |
 //| Cattura il vero centro di oscillazione                           |
 //+------------------------------------------------------------------+
 double CalculateTrimmedMean(const double &arr[], int size, double trimPercent = -1.0)
@@ -3500,7 +3533,7 @@ double CalculateTrimmedMean(const double &arr[], int size, double trimPercent = 
     if (size < 5) return CalculateEmpiricalMean(arr, size);  // Fallback per pochi dati
     
     // Se trimPercent non passato, usa default prudente (no H-based scaling)
-    if (trimPercent < 0) trimPercent = 0.10;
+    if (trimPercent < 0) trimPercent = TrimPercentDefault;
     
     // Copia e ordina
     double sorted[];
@@ -3570,7 +3603,7 @@ double CalculateEMA(const double &arr[], int size, double alpha)
 double CalculateAdaptiveCenter(const double &arr[], int size, double H)
 {
     // Fully empirical: centro robusto = mediana (signature mantenuta per compatibilita')
-    (void)H;
+    if (false) Print(H);
     if (size <= 0) return 0;
     if (size < 4) return CalculateEmpiricalMean(arr, size);
     return CalculateMedian(arr, size);
@@ -3675,29 +3708,29 @@ bool CalculateEmpiricalThresholds(TimeFrameData &data, int lookback)
             if (adx_data[i] > adx_max) adx_max = adx_data[i];
         }
         double adx_range = adx_max - adx_min;
-        if (adx_range < 0.1) {  // ADX piatto o quasi (< 0.1 punti di variazione)
+        if (adx_range < AdxFlatRangeThreshold) {  // ADX piatto o quasi
             // Log warning per debug
             if (g_enableLogsEffective) {
-                PrintFormat("[ADX EMPIRICAL] WARN: dati piatti rilevati: range=%.3f < 0.1 | Fallback: min=%.1f max=%.1f",
-                    adx_range, adx_min, adx_max);
+                PrintFormat("[ADX EMPIRICAL] WARN: dati piatti rilevati: range=%.3f < %.3f | Fallback: min=%.1f max=%.1f",
+                    adx_range, AdxFlatRangeThreshold, adx_min, adx_max);
             }
-            Print("[EMPIRICAL] ADX flat (range < 0.1) - TF usa fallback bootstrap");
+            Print("[EMPIRICAL] ADX flat (range sotto soglia) - TF usa fallback bootstrap");
             // Usa valori bootstrap approssimati invece di disabilitare
-            data.adx_p25 = adx_min + adx_range * 0.25;
-            data.adx_p75 = adx_min + adx_range * 0.75;
+            data.adx_p25 = adx_min + adx_range * (PercentileLow / 100.0);
+            data.adx_p75 = adx_min + adx_range * (PercentileHigh / 100.0);
             if (data.adx_p75 <= data.adx_p25) {
-                data.adx_p75 = data.adx_p25 + 1.0;  // Garantisce p75 > p25
+                data.adx_p75 = data.adx_p25 + AdxP75MinDelta;  // Garantisce p75 > p25
             }
         } else {
             // Percentili empirici standard
-            data.adx_p25 = CalculatePercentile(adx_data, n, 25.0);
-            data.adx_p75 = CalculatePercentile(adx_data, n, 75.0);
+            data.adx_p25 = CalculatePercentile(adx_data, n, PercentileLow);
+            data.adx_p75 = CalculatePercentile(adx_data, n, PercentileHigh);
             
             // Verifica finale (dovrebbe sempre passare con p_low < p_high)
             if (data.adx_p75 <= data.adx_p25) {
                 PrintFormat("[EMPIRICAL] ADX percentili ancora invalidi dopo calcolo (p25=%.2f p75=%.2f) - usa fallback",
                     data.adx_p25, data.adx_p75);
-                data.adx_p75 = data.adx_p25 + 1.0;  // Garantisce p75 > p25
+                data.adx_p75 = data.adx_p25 + AdxP75MinDelta;  // Garantisce p75 > p25
             }
         }
     } else {
@@ -3814,7 +3847,7 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     // Bollinger Bands
     organic.bb = slow;                      // BB periodo  slow
     // BB deviation: default standard (non H-driven)
-    organic.bb_dev = 2.0;
+    organic.bb_dev = BollingerDeviationDefault;
     
     // Volatility indicators
     organic.atr = medium;                   // ATR: volatilit  medium
@@ -3825,8 +3858,8 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     // ---------------------------------------------------------------
     
     // Parabolic SAR: parametri derivati dal ciclo (no H-driven)
-    organic.psar_step = MathMax(0.01, MathMin(0.10, 1.0 / MathMax(1.0, base)));
-    organic.psar_max = MathMax(0.10, MathMin(0.40, 4.0 / MathMax(1.0, base)));
+    organic.psar_step = MathMax(PSARStepMin, MathMin(PSARStepMax, 1.0 / MathMax(1.0, base)));
+    organic.psar_max = MathMax(PSARMaxMin, MathMin(PSARMaxMax, 4.0 / MathMax(1.0, base)));
     
     // SMA Cross (due medie in rapporto scale tra loro)
     organic.sma_fast = slow;                // SMA veloce = base  scale
@@ -5171,8 +5204,8 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
     //  FIX: Se ADX stddev=0 (mercato flat), NON bloccare - usa fallback!
     if (data.adx_stddev <= 0) {
         // Mercato molto stabile - usa 10% della media come pseudo-stddev
-        data.adx_stddev = data.adx_avg * 0.1;
-        if (data.adx_stddev <= 0) data.adx_stddev = 1.0;  // Fallback assoluto
+        data.adx_stddev = data.adx_avg * AdxStddevFallbackFrac;
+        if (data.adx_stddev <= 0) data.adx_stddev = AdxStddevAbsMin;  // Fallback assoluto
         if (g_enableLogsEffective) {
             PrintFormat("[ORGANIC] ADX stddev=0 (flat) - usando fallback: %.2f", data.adx_stddev);
         }
@@ -5323,9 +5356,9 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
         atr_scale = point_value;
     }
     
-    // Fallback 3: minimo assoluto = 0.00001 (5 decimali forex)
+    // Fallback 3: minimo assoluto = ATRScaleAbsMin
     if (atr_scale <= 0) {
-        atr_scale = 0.00001;
+        atr_scale = ATRScaleAbsMin;
     }
     
     // VALIDATO: atr_scale sempre > 0 dopo tutti i fallback
@@ -5423,8 +5456,8 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
             // Dentro la cloud = segnale proporzionale
             double cloud_width = cloud_top - cloud_bottom;
             double denominator = (cloud_width / 2.0) + atr_scale;
-            // Protezione divisione per zero
-            if (denominator < atr_scale * 0.01) denominator = atr_scale * 0.01;
+            // Protezione divisione per zero (guardrail configurabile)
+            if (denominator < atr_scale * PSARStepMin) denominator = atr_scale * PSARStepMin;
             cloud_signal = (price - cloud_mid) / denominator;
             cloud_signal = MathMax(-1.0, MathMin(1.0, cloud_signal));
         }
@@ -6469,6 +6502,9 @@ int ExecuteVotingLogic()
     double w_rsi = 1.0;
     double w_obv = 1.0;
     double w_stoch = 1.0;
+
+    // Fattore neutro: in v1.1 non si usa piu' alcun decay(H)
+    double decay = 1.0;
     
     double combinedScore = 0.0;
     double combinedMax = 0.0;
@@ -7288,8 +7324,8 @@ void CheckEarlyExitOnReversal()
         if (g_lastCacheATR > 0.0 && point > 0.0) {
             atrPips = g_lastCacheATR / point / 10.0;
         }
-        if (atrPips <= 0.0) atrPips = 10.0;
-        double minLossThreshold = MathMax(5.0, 0.5 * atrPips);
+        if (atrPips <= 0.0) atrPips = EarlyExitAtrPipsFallback;
+        double minLossThreshold = MathMax(EarlyExitMinLossPipsFloor, EarlyExitMinLossAtrFrac * atrPips);
         if (shouldClose && lossPips > minLossThreshold) {
             if (trade.PositionClose(ticket)) {
                 PrintFormat("[EARLY EXIT] Chiusa posizione #%I64u %s | Loss: %.1f pips (%.2f EUR) | Motivo: %s (forza %.0f%%)",
