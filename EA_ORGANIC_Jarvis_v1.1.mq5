@@ -27,7 +27,7 @@
 //| 2. BUFFER CIRCOLARI: Indici sempre in [0, MAX-1] via modulo     |
 //| 3. SOMME INCREMENTALI: Sanity check per floating point errors   |
 //| 4. VARIANZA: Protezione sqrt(negativo) -> ritorna 0.0           |
-//| 5. SCORE THRESHOLD: Bounds P25 <-> P75 della distribuzione      |
+//| 5. SCORE THRESHOLD: Bounds P{low} <-> P{high} (data-driven)     |
 //| --------------------------------------------------------------- |
 //+------------------------------------------------------------------+
 #property copyright "Pietro Giacobazzi, Juri Corradi, Alessandro Brehas"
@@ -36,6 +36,16 @@
 
 #include <Trade\Trade.mqh>
 #include <Arrays\ArrayDouble.mqh>
+
+// +---------------------------------------------------------------------------+
+//                      FORWARD DECLARATIONS (MQL5 single-pass)                
+// +---------------------------------------------------------------------------+
+string StateLabel(bool flag);
+void UpdateTrailingStops();
+void CheckEarlyExitOnReversal();
+void CheckAndCloseOnTimeStop();
+int  ExecuteVotingLogic();
+void ExecuteTradingLogic();
 
 // +---------------------------------------------------------------------------+
 //                      MONEY MANAGEMENT & GENERALE
@@ -197,7 +207,7 @@ struct OrganicPeriods {
 //--- Periodi organici per ogni timeframe (calcolati in OnInit)
 OrganicPeriods g_organic_M5, g_organic_H1, g_organic_H4, g_organic_D1;
 
-//  FIX: Periodi precedenti per rilevare cambi significativi (>25%)
+//  FIX: Periodi precedenti per rilevare cambi significativi (soglia data-driven)
 // Se i periodi cambiano drasticamente, gli handle indicatori devono essere ricreati
 OrganicPeriods g_prevOrganic_M5, g_prevOrganic_H1, g_prevOrganic_H4, g_prevOrganic_D1;
 bool g_periodsInitialized = false;  // Flag: primi periodi calcolati?
@@ -244,56 +254,402 @@ input bool   enableOBV       = true;    // OBV: divergenze volume/prezzo -> voto
 // | SOGLIA SCORE: OTSU (warmup) -> YOUDEN (feedback) con guardrail              |
 // | MEAN-REVERSION: RSI/Stoch/OBV votano nella direzione dell'inversione       |
 // +---------------------------------------------------------------------------+
-input group "--- SISTEMA ORGANICO ---"
-input bool   AutoScoreThreshold = true;         // Soglia automatica (true) o manuale (false)
-input double ScoreThreshold     = 50.0;         // Soglia manuale (50% = mediana) - solo se Auto=false
+//--- SISTEMA ORGANICO ---
+bool   AutoScoreThreshold = true;         // AUTO: forzato a true da AutoConfigureOrganicSystemParams()
+double ScoreThreshold     = 50.0;         // Usato solo se AutoScoreThreshold=false (in pratica non usato)
 
-input bool   EnableYoudenExpDecay = true;        // Se true: Youden pesa di piu' i trade recenti (decay esponenziale)
-input double YoudenHalfLifeTrades = 120.0;       // Half-life in numero trade (es: 120 => dopo 120 trade il peso dimezza). Piu alto = piu stabile
-input bool   EnableYoudenUseRMultiple = true;    // Se true: classifica win/loss usando R-multiple (profitPts/riskPts da SL) invece del solo NetProfit
-input double YoudenMinRMultiple = 0.0;           // Trade "positivo" se R >= questo valore (0=break-even). Se SL non disponibile, fallback su NetProfit>=0
-input int    YoudenMinWins = 15;                 // Guardrail: minimo win (classe positiva) per attivare Youden (0=off)
-input int    YoudenMinLosses = 15;               // Guardrail: minimo loss (classe negativa) per attivare Youden (0=off)
-input double YoudenSmoothingAlpha = 0.95;        // Smoothing soglia Youden: T = alpha*Tprev + (1-alpha)*Tnew (0=off). Piu alto = piu stabile
+bool   EnableYoudenExpDecay = true;        // AUTO: impostato da AutoConfigureOrganicSystemParams()
+double YoudenHalfLifeTrades = 0.0;         // AUTO: half-life (trade) derivata da buffer/periodi empirici
+bool   EnableYoudenUseRMultiple = true;    // AUTO: true se abbiamo un riskPts stimabile (SL)
+double YoudenMinRMultiple = 0.0;           // AUTO: break-even in R (costi stimati / risk)
+int    YoudenMinWins = 0;                  // AUTO: guardrail minimo win per attivare Youden
+int    YoudenMinLosses = 0;                // AUTO: guardrail minimo loss per attivare Youden
+double YoudenSmoothingAlpha = 0.0;         // AUTO: smoothing derivato da half-life
 
-input group "--- PERFORMANCE BACKTEST ---"
-input int    RecalcEveryBars    = 0;            // Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
+//--- PERFORMANCE BACKTEST ---
+int    RecalcEveryBars    = 0;            // Ricalcolo ogni N barre (0=ogni barra, 100=veloce, 200=molto veloce)
+
+
+//+------------------------------------------------------------------+
+//| AUTO-CONFIG: parametri organici da dati mercato                  |
+//| Nota: qui NON decidiamo SL/TP/TF/indicatori (quelli restano input)|
+//+------------------------------------------------------------------+
+void AutoConfigureOrganicSystemParams()
+{
+    // Soglia score: sempre automatica (Otsu -> Youden)
+    AutoScoreThreshold = true;
+    ScoreThreshold = 50.0;
+
+    // Half-life: la deriviamo dai buffer empirici (già data-driven dai periodi naturali)
+    // - g_recentTradesMax: finestra trade recente (data-driven)
+    // - g_minTradesForYouden: quando attivare Youden (data-driven)
+    double baseHL = (double)MathMax(1, MathMax(g_recentTradesMax, g_minTradesForYouden));
+    YoudenHalfLifeTrades = baseHL; // più grande = più stabile
+
+    // Smoothing coerente con half-life: alpha = exp(-ln(2)/halfLife)
+    // Usato come: T = alpha*Tprev + (1-alpha)*Tnew
+    if (YoudenHalfLifeTrades > 0.0) {
+        double ln2 = MathLog(2.0);
+        YoudenSmoothingAlpha = MathExp(-ln2 / YoudenHalfLifeTrades);
+    } else {
+        YoudenSmoothingAlpha = 0.0;
+    }
+
+    // Se abbiamo un rischio stimabile (SL), possiamo usare R-multiple.
+    // Altrimenti, fallback interno su NetProfit>=0 (come già previsto nel codice).
+    int riskPts = 0;
+    if (BuyStopLossPoints > 0)  riskPts = MathMax(riskPts, BuyStopLossPoints);
+    if (SellStopLossPoints > 0) riskPts = MathMax(riskPts, SellStopLossPoints);
+    EnableYoudenUseRMultiple = (riskPts > 0);
+
+    // MinR: stima costi in "R" usando spread/slippage massimi consentiti.
+    // (dipende da input operativi, ma non è un parametro "tunable" del sistema organico)
+    YoudenMinRMultiple = 0.0;
+    if (riskPts > 0) {
+        double costPts = MathMax(0.0, MaxSpread) + (double)MaxSlippage;
+        YoudenMinRMultiple = costPts / (double)riskPts;
+    }
+
+    // Guardrail min win/loss: derivato dalla dimensione finestra Youden (data-driven)
+    // sqrt(N) è una regola robusta e non dipende da numeri “arbitrari” di mercato.
+    int n = MathMax(0, g_minTradesForYouden);
+    int minClass = (n > 0) ? (int)MathCeil(MathSqrt((double)n)) : 0;
+    YoudenMinWins = minClass;
+    YoudenMinLosses = minClass;
+
+    // Exp-decay: coerente con half-life; se half-life non valido, disattiva.
+    EnableYoudenExpDecay = (YoudenHalfLifeTrades > 1.0);
+}
 
 // +---------------------------------------------------------------------------+
-// |                  GUARDRAILS / DEFAULTS (configurabili)                     |
+// |                  GUARDRAILS / DEFAULTS (auto)                              |
 // | Obiettivo: nessun parametro di scala/clamp hardcoded nella logica.         |
 // +---------------------------------------------------------------------------+
-input group "--- GUARDRAILS / DEFAULTS ---"
-input double DataDrivenRatioMin          = 0.5;      // Clamp minimo ratio (refPeriod/basePeriod)
-input double DataDrivenRatioMax          = 3.0;      // Clamp massimo ratio (refPeriod/basePeriod)
-input int    DataDrivenBufferMin         = 4;        // Clamp minimo buffer size
-input int    DataDrivenBufferMax         = 4096;     // Clamp massimo buffer size
-input int    BufferXLargeMin             = 128;      // Minimo assoluto per GetBufferXLarge()
-input double NumericEpsilon              = 1e-6;     // Epsilon numerico per evitare /0
-input double PercentileLow               = 25.0;     // Percentile low (es: P25) usato come guardrail robusto
-input double PercentileHigh              = 75.0;     // Percentile high (es: P75) usato come guardrail robusto
-input double IQRLogChangeFrac            = 0.10;     // Frazione IQR per soglia anti-spam nei log (threshold change)
-input double YoudenStepSizeFallback      = 0.1;      // Fallback step-size se range nullo/degenerato
-input int    YoudenTargetTestsMin        = 8;        // Minimo numero di test per ricerca soglia Youden
-input double YoudenTargetTestsScale      = 4.0;      // Scala per targetTests (sqrt(trades)*scale)
-input double TrimPercentDefault          = 0.10;     // Default trimmed-mean (se non passato)
-input double ObvAbsEpsilon               = 1e-10;    // Epsilon per evitare /0 in OBV normalization
-input double ObvMinChangeFallback        = 0.0025;   // Fallback minChange per OBV divergence se dati insufficienti
-input double AdxFlatRangeThreshold       = 0.1;      // Range minimo per considerare ADX non-flat
-input double AdxStddevFallbackFrac       = 0.1;      // Se stddev=0: usa frac*avg come pseudo-stddev
-input double AdxStddevAbsMin             = 1.0;      // Fallback assoluto per stddev ADX
-input double AdxP75MinDelta              = 1.0;      // Delta minimo per garantire p75 > p25 (ADX)
-input double BollingerDeviationDefault   = 2.0;      // Default BB deviation (se non stimata)
-input double PSARStepMin                 = 0.01;     // Clamp minimo step PSAR
-input double PSARStepMax                 = 0.10;     // Clamp massimo step PSAR
-input double PSARMaxMin                  = 0.10;     // Clamp minimo max PSAR
-input double PSARMaxMax                  = 0.40;     // Clamp massimo max PSAR
-input double PointFallbackNonJPY         = 0.00001;  // Fallback point se SymbolInfoDouble fallisce (non-JPY)
-input double PointFallbackJPYLike        = 0.01;     // Fallback point per simboli JPY/XAU se SymbolInfoDouble fallisce
-input double ATRScaleAbsMin              = 0.00001;  // Minimo assoluto per scale (fallback finale)
-input double EarlyExitAtrPipsFallback    = 10.0;     // Fallback ATR pips se ATR non disponibile
-input double EarlyExitMinLossPipsFloor   = 5.0;      // Min loss pips per early-exit
-input double EarlyExitMinLossAtrFrac     = 0.5;      // Min loss = max(floor, frac*ATRpips)
+//--- GUARDRAILS / DEFAULTS ---
+double DataDrivenRatioMin          = 0.0;      // AUTO (bootstrap + empirical)
+double DataDrivenRatioMax          = 0.0;      // AUTO (bootstrap + empirical)
+int    DataDrivenBufferMin         = 0;        // AUTO
+int    DataDrivenBufferMax         = 0;        // AUTO (con hard-cap tecnico per memoria)
+int    BufferXLargeMin             = 0;        // AUTO
+double NumericEpsilon              = 0.0;      // AUTO (da digits)
+double PercentileLow               = 0.0;      // AUTO (definizione robusta)
+double PercentileHigh              = 0.0;      // AUTO (definizione robusta)
+double IQRLogChangeFrac            = 0.0;      // AUTO (anti-spam log)
+double YoudenStepSizeFallback      = 0.0;      // AUTO
+int    YoudenTargetTestsMin        = 0;        // AUTO
+double YoudenTargetTestsScale      = 0.0;      // AUTO
+double TrimPercentDefault          = 0.0;      // AUTO
+double ObvAbsEpsilon               = 0.0;      // AUTO
+double ObvMinChangeFallback        = 0.0;      // AUTO
+double AdxFlatRangeThreshold       = 0.0;      // AUTO
+double AdxStddevFallbackFrac       = 0.0;      // AUTO
+double AdxStddevAbsMin             = 0.0;      // AUTO
+double AdxP75MinDelta              = 0.0;      // AUTO
+double BollingerDeviationDefault   = 0.0;      // AUTO
+double PSARStepMin                 = 0.0;      // AUTO
+double PSARStepMax                 = 0.0;      // AUTO
+double PSARMaxMin                  = 0.0;      // AUTO
+double PSARMaxMax                  = 0.0;      // AUTO
+double PointFallbackNonJPY         = 0.0;      // AUTO (da digits)
+double PointFallbackJPYLike        = 0.0;      // AUTO (da digits)
+double ATRScaleAbsMin              = 0.0;      // AUTO
+double EarlyExitAtrPipsFallback    = 0.0;      // AUTO
+double EarlyExitMinLossPipsFloor   = 0.0;      // AUTO
+double EarlyExitMinLossAtrFrac     = 0.0;      // AUTO
+
+// +---------------------------------------------------------------------------+
+// | Guardrails AUTO (bootstrap + empirical + after-buffers)                    |
+// +---------------------------------------------------------------------------+
+
+void GetEnabledTFSecondsMinMax(int &minSec, int &maxSec)
+{
+    minSec = 0;
+    maxSec = 0;
+
+    if(EnableVote_M5)
+    {
+        int s = PERIOD_M5 * 60;
+        if(minSec <= 0 || s < minSec) minSec = s;
+        if(maxSec <= 0 || s > maxSec) maxSec = s;
+    }
+    if(EnableVote_H1)
+    {
+        int s = PERIOD_H1 * 60;
+        if(minSec <= 0 || s < minSec) minSec = s;
+        if(maxSec <= 0 || s > maxSec) maxSec = s;
+    }
+    if(EnableVote_H4)
+    {
+        int s = PERIOD_H4 * 60;
+        if(minSec <= 0 || s < minSec) minSec = s;
+        if(maxSec <= 0 || s > maxSec) maxSec = s;
+    }
+    if(EnableVote_D1)
+    {
+        int s = PERIOD_D1 * 60;
+        if(minSec <= 0 || s < minSec) minSec = s;
+        if(maxSec <= 0 || s > maxSec) maxSec = s;
+    }
+
+    // fallback: timeframe corrente
+    if(minSec <= 0 || maxSec <= 0)
+    {
+        int cur = (int)PeriodSeconds(_Period);
+        if(cur <= 0) cur = 1;
+        minSec = cur;
+        maxSec = cur;
+    }
+}
+
+int GetLogThrottleSeconds()
+{
+    int minSec, maxSec;
+    GetEnabledTFSecondsMinMax(minSec, maxSec);
+    double s = MathSqrt((double)MathMax(1, minSec));
+    int out = (int)MathRound(MathMax(1.0, s));
+    if(out <= 0) out = 1;
+    return out;
+}
+
+int GetTerminalMaxBarsSafe()
+{
+    int maxBars = (int)TerminalInfoInteger(TERMINAL_MAXBARS);
+    if(maxBars <= 0)
+        maxBars = Bars(_Symbol, _Period);
+    if(maxBars <= 0)
+        maxBars = 1;
+    return maxBars;
+}
+
+void GetNaturalPeriodMinMax(int &minP, int &maxP)
+{
+    minP = 0;
+    maxP = 0;
+
+    if(g_dataReady_M5 && g_naturalPeriod_M5 > 0)
+    {
+        minP = g_naturalPeriod_M5;
+        maxP = g_naturalPeriod_M5;
+    }
+    if(g_dataReady_H1 && g_naturalPeriod_H1 > 0)
+    {
+        if(minP <= 0 || g_naturalPeriod_H1 < minP) minP = g_naturalPeriod_H1;
+        if(maxP <= 0 || g_naturalPeriod_H1 > maxP) maxP = g_naturalPeriod_H1;
+    }
+    if(g_dataReady_H4 && g_naturalPeriod_H4 > 0)
+    {
+        if(minP <= 0 || g_naturalPeriod_H4 < minP) minP = g_naturalPeriod_H4;
+        if(maxP <= 0 || g_naturalPeriod_H4 > maxP) maxP = g_naturalPeriod_H4;
+    }
+    if(g_dataReady_D1 && g_naturalPeriod_D1 > 0)
+    {
+        if(minP <= 0 || g_naturalPeriod_D1 < minP) minP = g_naturalPeriod_D1;
+        if(maxP <= 0 || g_naturalPeriod_D1 > maxP) maxP = g_naturalPeriod_D1;
+    }
+
+    if(minP <= 0 || maxP <= 0)
+    {
+        int fallbackMin = (g_naturalPeriod_Min > 0 ? g_naturalPeriod_Min : GetBootstrapMinBars());
+        if(fallbackMin <= 0) fallbackMin = 1;
+
+        int minSec, maxSec;
+        GetEnabledTFSecondsMinMax(minSec, maxSec);
+        double span = (double)maxSec / (double)MathMax(1, minSec);
+        if(span < 1.0) span = 1.0;
+
+        minP = fallbackMin;
+        maxP = (int)MathMax(minP, MathCeil((double)minP * span));
+    }
+}
+
+void AutoConfigurePercentileBoundsFromN(const int n)
+{
+    // Percentili come funzione di N: tailMass = 1/sqrt(N)
+    // - N piccolo  => tail grande => bounds più centrali (più robusti)
+    // - N grande   => tail piccolo => bounds più larghi (meno clamp)
+    int nEff = n;
+    if(nEff <= 0)
+        nEff = DataDrivenBufferMin * DataDrivenBufferMin;
+    if(nEff <= 0)
+        nEff = 1;
+
+    double tail = 1.0 / MathSqrt((double)nEff);
+
+    // clamp tail usando solo quantità già data-driven
+    double tailMin = 1.0 / MathSqrt((double)MathMax(1, DataDrivenBufferMax));
+    double tailMax = 1.0 / MathSqrt((double)MathMax(1, DataDrivenBufferMin));
+    tail = MathMax(tailMin, MathMin(tail, tailMax));
+    if(tail < NumericEpsilon)
+        tail = NumericEpsilon;
+
+    PercentileLow  = 100.0 * tail;
+    PercentileHigh = 100.0 * (1.0 - tail);
+    if(PercentileHigh <= PercentileLow)
+    {
+        PercentileLow  = 50.0 - 50.0 * NumericEpsilon;
+        PercentileHigh = 50.0 + 50.0 * NumericEpsilon;
+    }
+}
+
+void AutoConfigureGuardrailsBootstrap()
+{
+    const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    const int d = (_Digits > 0 ? _Digits : (digits > 0 ? digits : 1));
+
+    // point fallbacks coerenti con la precisione del simbolo
+    PointFallbackNonJPY  = MathPow(10.0, -(double)d);
+    PointFallbackJPYLike = PointFallbackNonJPY;
+
+    // epsilon: qualche ordine di grandezza sotto il tick
+    NumericEpsilon = MathPow(10.0, -(double)(d + 4));
+    if(NumericEpsilon <= 0.0)
+    {
+        double p = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+        if(p <= 0.0) p = PointFallbackNonJPY;
+        NumericEpsilon = MathAbs(p) * MathAbs(p);
+    }
+
+    // ratio clamp: dipende dalla dispersione dei TF abilitati
+    int minSec, maxSec;
+    GetEnabledTFSecondsMinMax(minSec, maxSec);
+    double tfSpan = (double)maxSec / (double)MathMax(1, minSec);
+    if(tfSpan < 1.0) tfSpan = 1.0;
+    DataDrivenRatioMax = tfSpan;
+    DataDrivenRatioMin = 1.0 / tfSpan;
+
+    // buffer clamp: dipende dalla profondità storica disponibile (tecnica)
+    const int maxBars = GetTerminalMaxBarsSafe();
+    DataDrivenBufferMax = (int)MathMax(1, maxBars);
+    DataDrivenBufferMin = (int)MathMax(2, MathCeil(MathSqrt((double)MathMax(1, GetBootstrapMinBars()))));
+    DataDrivenBufferMax = (int)MathMax(DataDrivenBufferMin, DataDrivenBufferMax);
+    BufferXLargeMin = (int)MathMin(
+        DataDrivenBufferMax,
+        MathMax(
+            (int)MathCeil(MathSqrt((double)DataDrivenBufferMax)),
+            DataDrivenBufferMin * DataDrivenBufferMin
+        )
+    );
+
+    // percentili: data-driven da N proxy (buffer minimo)
+    AutoConfigurePercentileBoundsFromN(DataDrivenBufferMin * DataDrivenBufferMin);
+
+    // log-change guardrail: più storia => soglia più piccola
+    IQRLogChangeFrac = 1.0 / MathMax(1.0, MathSqrt((double)DataDrivenBufferMax));
+
+    // indicatori/derivati
+    ObvAbsEpsilon = NumericEpsilon;
+
+    // inizializza i restanti a valori sensati, poi raffina più avanti
+    if(TrimPercentDefault <= 0.0)
+    {
+        double tail = (PercentileLow > 0.0 ? (PercentileLow / 100.0) : 0.0);
+        TrimPercentDefault = (tail > 0.0 ? tail : (1.0 / MathSqrt((double)MathMax(1, DataDrivenBufferMin))));
+    }
+    if(YoudenTargetTestsScale <= 0.0) YoudenTargetTestsScale = MathMax(1.0, MathSqrt((double)DataDrivenBufferMin));
+    if(YoudenTargetTestsMin <= 0) YoudenTargetTestsMin = (int)MathMax(2, MathCeil(MathSqrt((double)DataDrivenBufferMin)));
+    if(YoudenStepSizeFallback <= 0.0) YoudenStepSizeFallback = 100.0 / (double)MathMax(1, DataDrivenBufferMin * DataDrivenBufferMin);
+
+    // Derivazioni "safe" senza numeri di mercato: dipendono da precisione e finestre.
+    double base = (double)MathMax(1, BufferXLargeMin);
+
+    AdxStddevFallbackFrac = 1.0 / MathMax(1.0, MathSqrt(base));
+    AdxStddevAbsMin       = MathMax(NumericEpsilon, 100.0 / MathMax(1.0, (double)DataDrivenBufferMax));
+    AdxFlatRangeThreshold = 1.0 / MathMax(1.0, MathSqrt(base));
+    AdxP75MinDelta        = 100.0 / MathMax(1.0, base);
+
+    BollingerDeviationDefault = MathMax(
+        1.0,
+        MathSqrt(base) / MathMax(1.0, MathSqrt((double)MathMax(1, DataDrivenBufferMin)))
+    );
+
+    PSARStepMin = 1.0 / base;
+    PSARStepMax = 1.0 / MathSqrt(base);
+    if(PSARStepMax < PSARStepMin) PSARStepMax = PSARStepMin;
+    PSARMaxMin  = MathMin(1.0, MathSqrt(base) * PSARStepMin);
+    PSARMaxMax  = MathMin(1.0, MathSqrt(base) * PSARStepMax);
+    if(PSARMaxMax < PSARMaxMin) PSARMaxMax = PSARMaxMin;
+
+    ATRScaleAbsMin = PointFallbackNonJPY;
+}
+
+void AutoConfigureGuardrailsEmpirical()
+{
+    int minP, maxP;
+    GetNaturalPeriodMinMax(minP, maxP);
+
+    double span = (double)maxP / (double)MathMax(1, minP);
+    if(span < 1.0) span = 1.0;
+    DataDrivenRatioMax = span;
+    DataDrivenRatioMin = 1.0 / span;
+
+    // buffer min cresce con la granularità osservata (periodo minimo)
+    int newMin = (int)MathMax(DataDrivenBufferMin, MathCeil(MathSqrt((double)MathMax(1, minP))));
+    DataDrivenBufferMin = newMin;
+    DataDrivenBufferMax = (int)MathMax(DataDrivenBufferMax, DataDrivenBufferMin);
+    BufferXLargeMin = (int)MathMin(DataDrivenBufferMax, MathMax(BufferXLargeMin, DataDrivenBufferMin * DataDrivenBufferMin));
+
+    // PSAR clamp derivati dal periodo naturale minimo
+    double base = (double)MathMax(1, minP);
+    PSARStepMin = 1.0 / base;
+    PSARStepMax = 1.0 / MathSqrt(base);
+    if(PSARStepMax < PSARStepMin) PSARStepMax = PSARStepMin;
+    PSARMaxMin  = MathMin(1.0, MathSqrt(base) * PSARStepMin);
+    PSARMaxMax  = MathMin(1.0, MathSqrt(base) * PSARStepMax);
+    if(PSARMaxMax < PSARMaxMin) PSARMaxMax = PSARMaxMin;
+
+    // BB: deviazione coerente con volatilità relativa (proxy via periodo)
+    BollingerDeviationDefault = MathMax(
+        1.0,
+        MathSqrt(base) / MathMax(1.0, MathSqrt((double)MathMax(1, DataDrivenBufferMin)))
+    );
+
+    // ADX: soglie di "flatness" e delta percentili
+    AdxFlatRangeThreshold = 1.0 / MathMax(1.0, MathSqrt(base));
+    AdxP75MinDelta        = 100.0 / MathMax(1.0, base);
+}
+
+void AutoConfigureGuardrailsAfterBuffers()
+{
+    int smallW = GetBufferSmall();
+    int medW   = GetBufferMedium();
+    int largeW = GetBufferLarge();
+
+    YoudenTargetTestsScale = MathMax(1.0, MathSqrt((double)MathMax(1, smallW)));
+    YoudenTargetTestsMin   = (int)MathMax(2, MathCeil(MathSqrt((double)MathMax(1, smallW))));
+
+    YoudenStepSizeFallback = 100.0 / (double)MathMax(1, medW);
+    TrimPercentDefault     = (PercentileLow > 0.0 ? (PercentileLow / 100.0) : (1.0 / MathSqrt((double)MathMax(1, medW))));
+
+    // OBV: minimo cambiamento relativo ~ 1 tick sul prezzo
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    if(bid <= 0.0)
+        bid = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    if(bid <= 0.0)
+        bid = MathMax(NumericEpsilon, g_pointValue);
+    ObvMinChangeFallback = MathMax(NumericEpsilon, g_pointValue / bid);
+
+    // ADX: pseudo-stddev se varianza nulla
+    AdxStddevFallbackFrac = 1.0 / MathMax(1.0, MathSqrt((double)MathMax(1, medW)));
+    AdxStddevAbsMin       = MathMax(NumericEpsilon, 100.0 / MathMax(1.0, (double)largeW));
+
+    // ATR scale minimo: usa spread come proxy (in prezzo)
+    double spreadPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    ATRScaleAbsMin = MathMax(g_pointValue, spreadPts * g_pointValue);
+
+    // Early-exit: fallback proporzionale al costo/rumore
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double pipsPerPoint = 1.0;
+    if(digits == 3 || digits == 5) pipsPerPoint = 0.1;
+    double spreadPips = spreadPts * pipsPerPoint;
+    if(spreadPips <= 0.0) spreadPips = MathMax(NumericEpsilon, pipsPerPoint);
+
+    EarlyExitAtrPipsFallback  = spreadPips * MathMax(1.0, MathSqrt((double)MathMax(1, smallW)));
+    EarlyExitMinLossPipsFloor = MathMax(NumericEpsilon, spreadPips);
+    EarlyExitMinLossAtrFrac   = 1.0 / MathMax(1.0, MathSqrt((double)MathMax(1, medW)));
+
+    // percentili: raffinamento finale usando N effettivo dello score history
+    AutoConfigurePercentileBoundsFromN(SCORE_HISTORY_MAX);
+}
 
 
 //  FUNZIONE: Calcola buffer size 100% auto-driven
@@ -301,7 +657,7 @@ input double EarlyExitMinLossAtrFrac     = 0.5;      // Min loss = max(floor, fr
 // ratio deriva dai periodi naturali osservati (nessun uso di H)
 int GetDataDrivenBufferSize(int basePeriod, int exponent)
 {
-    int refPeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int refPeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     double denom = (double)MathMax(1, basePeriod);
     double ratio = (double)refPeriod / denom;
 
@@ -319,44 +675,91 @@ int GetDataDrivenBufferSize(int basePeriod, int exponent)
 }
 
 //  FUNZIONI BUFFER 100% DATA-DRIVEN
-// Prima OnInit: usa BOOTSTRAP_MIN_BARS (minimo statistico)
+// Prima OnInit: usa bootstrapMinBars (minimo derivato dalla storia disponibile)
 // Dopo OnInit: usa periodi empirici calcolati dai dati
 //  Si adattano dinamicamente ai periodi naturali!
+
+// BOOTSTRAP (data-driven): minimo barre derivato dalla storia disponibile (iBars)
+int g_bootstrapMinBars = 0;
+
+int ComputeBootstrapMinBars()
+{
+    int minBars = 0;
+
+    if(EnableVote_M5)
+    {
+        int b = iBars(_Symbol, PERIOD_M5);
+        if(b > 0) minBars = (minBars <= 0 ? b : MathMin(minBars, b));
+    }
+    if(EnableVote_H1)
+    {
+        int b = iBars(_Symbol, PERIOD_H1);
+        if(b > 0) minBars = (minBars <= 0 ? b : MathMin(minBars, b));
+    }
+    if(EnableVote_H4)
+    {
+        int b = iBars(_Symbol, PERIOD_H4);
+        if(b > 0) minBars = (minBars <= 0 ? b : MathMin(minBars, b));
+    }
+    if(EnableVote_D1)
+    {
+        int b = iBars(_Symbol, PERIOD_D1);
+        if(b > 0) minBars = (minBars <= 0 ? b : MathMin(minBars, b));
+    }
+
+    if(minBars <= 0)
+    {
+        minBars = GetTerminalMaxBarsSafe();
+    }
+
+    int bootstrap = (int)MathCeil(MathSqrt((double)MathMax(1, minBars)));
+    bootstrap = MathMax(2, MathMin(bootstrap, minBars));
+    return bootstrap;
+}
+
+int GetBootstrapMinBars()
+{
+    if(g_bootstrapMinBars > 0) return g_bootstrapMinBars;
+    return ComputeBootstrapMinBars();
+}
+
 int GetBufferSmall()   
 { 
-    int base = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int base = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     return GetDataDrivenBufferSize(base, 0); 
 }
 
 int GetBufferMedium()  
 { 
-    int base = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int base = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     return GetDataDrivenBufferSize(base, 1); 
 }
 
 int GetBufferLarge()   
 { 
-    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : BOOTSTRAP_MIN_BARS;
+    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : GetBootstrapMinBars();
     return GetDataDrivenBufferSize(base, 1); 
 }
 
 int GetBufferXLarge()  
 { 
-    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : BOOTSTRAP_MIN_BARS;
+    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : GetBootstrapMinBars();
     int result = GetDataDrivenBufferSize(base, 2);
     return MathMax(result, BufferXLargeMin);  // Minimo configurabile per calcoli robusti
 }
 
 int GetBufferHuge()    
 { 
-    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : BOOTSTRAP_MIN_BARS;
+    int base = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : GetBootstrapMinBars();
     int result = GetDataDrivenBufferSize(base, 3);
-    return MathMax(result, 256);  // Minimo 256 barre per calcoli robusti
+    // Minimo data-driven per calcoli robusti: dipende dai clamp/buffer auto
+    int minHuge = MathMax(BufferXLargeMin, DataDrivenBufferMin * DataDrivenBufferMin);
+    if(minHuge <= 0)
+        minHuge = MathMax(GetBootstrapMinBars() * 2, 1);
+    return MathMax(result, minHuge);
 }
 
-//  BOOTSTRAP: Costanti minime statistiche per inizializzazione
-const int BOOTSTRAP_MIN_BARS = 64;                        // Minimo robusto per analisi statistiche (era 8, troppo basso)
-// BOOTSTRAP_SAFE_BARS calcolato dinamicamente in OnInit come g_naturalPeriod_Min  2
+// BOOTSTRAP_SAFE_BARS calcolato dinamicamente in OnInit come g_naturalPeriod_Min * 2
 
 //  DATA-DRIVEN: Periodi naturali empirici (da autocorrelazione)
 int g_naturalPeriod_M5 = 0;                               // Periodo naturale M5
@@ -372,10 +775,6 @@ int g_lookback_M5 = 0;                                    // Lookback adattivo M
 int g_lookback_H1 = 0;                                    // Lookback adattivo H1
 int g_lookback_H4 = 0;                                    // Lookback adattivo H4
 int g_lookback_D1 = 0;                                    // Lookback adattivo D1
-
-//  DATA-DRIVEN: Base di scala empirica (derivata dal rapporto TF)
-double g_empiricalScaleBase = 2.0;                        // Base di scala (default 2, poi calcolato dai dati)
-bool   g_scaleBaseReady = false;                          // True quando calcolato empiricamente
 
 // ---------------------------------------------------------------------------
 //  OTTIMIZZAZIONE PERFORMANCE BACKTEST
@@ -620,7 +1019,7 @@ bool GetEntrySnapshot(ulong positionId, EntrySnapshot &outSnap)
 void EnsureOpenEntrySnapsCapacity(int minCap)
 {
     if (g_openEntrySnapsCap >= minCap) return;
-    int newCap = (g_openEntrySnapsCap <= 0) ? 16 : g_openEntrySnapsCap;
+    int newCap = (g_openEntrySnapsCap <= 0) ? MathMax(2, GetBufferMedium()) : g_openEntrySnapsCap;
     while (newCap < minCap) newCap *= 2;
     ArrayResize(g_openEntrySnaps, newCap);
     g_openEntrySnapsCap = newCap;
@@ -631,11 +1030,12 @@ void RegisterEntrySnapshot(const EntrySnapshot &snap)
     if (snap.positionId == 0) return;
 
     // Safety: in teoria le posizioni aperte simultanee sono limitate, ma evitiamo crescita anomala
-    const int OPEN_SNAP_MAX = 5000;
-    if (g_openEntrySnapsCount >= OPEN_SNAP_MAX) {
+    int openSnapMax = MathMax(MaxOpenTrades, MathMax(g_openTicketsMax, GetBufferHuge()));
+    if(openSnapMax <= 0) openSnapMax = MaxOpenTrades;
+    if (g_openEntrySnapsCount >= openSnapMax) {
         static bool s_loggedSnapMax = false;
         if (!s_loggedSnapMax) {
-            PrintFormat("[EXPORT-EXT] Troppi snapshot aperti (%d). Stop register per safety.", OPEN_SNAP_MAX);
+            PrintFormat("[EXPORT-EXT] Troppi snapshot aperti (%d). Stop register per safety.", openSnapMax);
             s_loggedSnapMax = true;
         }
         return;
@@ -669,7 +1069,7 @@ bool GetAndRemoveEntrySnapshot(ulong positionId, EntrySnapshot &outSnap)
 void EnsureExtendedTradesCapacity(int minCap)
 {
     if (g_extendedTradesCap >= minCap) return;
-    int newCap = (g_extendedTradesCap <= 0) ? 256 : g_extendedTradesCap;
+    int newCap = (g_extendedTradesCap <= 0) ? MathMax(2, GetBufferXLarge()) : g_extendedTradesCap;
     while (newCap < minCap) newCap *= 2;
     ArrayResize(g_extendedTrades, newCap);
     g_extendedTradesCap = newCap;
@@ -689,11 +1089,11 @@ void AppendExtendedTrade(const ExtendedTradeRecord &rec)
     }
 
     // Safety: evita crescita memoria illimitata in run lunghi/rumorosi
-    const int EXTENDED_EXPORT_MAX_RECORDS = 200000;
-    if (g_extendedTradesCount >= EXTENDED_EXPORT_MAX_RECORDS) {
+    int maxRecords = MathMax(GetBufferHuge(), GetTerminalMaxBarsSafe());
+    if (g_extendedTradesCount >= maxRecords) {
         static bool s_loggedMax = false;
         if (!s_loggedMax) {
-            PrintFormat("[EXPORT-EXT] Buffer pieno (%d record). Stop append per safety.", EXTENDED_EXPORT_MAX_RECORDS);
+            PrintFormat("[EXPORT-EXT] Buffer pieno (%d record). Stop append per safety.", maxRecords);
             s_loggedMax = true;
         }
         return;
@@ -896,7 +1296,7 @@ void CB_RecordClosedTrade(double netProfit, datetime closeTime)
 int GetBootstrapSafeBars()
 {
     if (g_naturalPeriod_Min > 0) return g_naturalPeriod_Min * 2;
-    return MathMax(BOOTSTRAP_MIN_BARS * 2, GetBufferHuge());
+    return MathMax(GetBootstrapMinBars() * 2, GetBufferHuge());
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,7 +1580,7 @@ double g_reversalThreshold = 0.0;        // Soglia iniziale = 0, calcolata dai d
 bool g_reversalThresholdReady = false;   // True quando soglia calcolata dai dati
 
 //  STOCHASTIC EXTREME DETECTION (ipercomprato/ipervenduto)
-// Soglie standard: ipervenduto < 25%, ipercomprato > 75%
+// Soglie: percentili empirici P{low}/P{high} (data-driven)
 int g_stochExtremeSignal = 0;            // +1=ipervenduto (bullish reversal), -1=ipercomprato (bearish), 0=neutro
 double g_stochExtremeStrength = 0.0;     // Forza segnale (0-1)
 
@@ -1251,9 +1651,9 @@ struct TimeFrameData {
     double stoch_scale;     // Stdev empirico Stochastic
     double obv_scale;       // Stdev empirico variazioni OBV
     
-    // ADX PERCENTILI - Derivati dalla distribuzione storica
-    double adx_p25;         // 38esimo percentile ADX (range "basso")
-    double adx_p75;         // 62esimo percentile ADX (range "alto")
+    // ADX PERCENTILI - Derivati dalla distribuzione storica (bounds data-driven)
+    double adx_p25;         // PercentileLow ADX (range "basso")
+    double adx_p75;         // PercentileHigh ADX (range "alto")
     
     // Riferimento ai periodi organici del TF (impostato in LoadTimeFrameData)
     OrganicPeriods organic; // Periodi e peso organico del timeframe
@@ -1281,15 +1681,6 @@ bool g_vote_D1_active = false;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    // ---------------------------------------------------------------
-    //  STEP 0: INIZIALIZZAZIONE BUFFER (fully empirical)
-    // Dimensioni derivate da periodi naturali e buffer statistici.
-    // ---------------------------------------------------------------
-    // SCORE: periodo H1 empirico, buffer data-driven
-    // Bootstrap: usa GetBootstrapSafeBars() = g_naturalPeriod_Min  2 (dinamico)
-    int scoreBase = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : GetBootstrapSafeBars();
-    SCORE_HISTORY_MAX = GetDataDrivenBufferSize(scoreBase, 4);
-    
     // RILEVAMENTO BACKTEST E OTTIMIZZAZIONE AUTOMATICA
     g_isBacktest = (bool)MQLInfoInteger(MQL_TESTER);
     g_enableLogsEffective = EnableLogs && !g_isBacktest;
@@ -1311,10 +1702,16 @@ int OnInit()
     }
     
     Print("[INIT] Avvio EA Jarvis v4 FULL DATA-DRIVEN - periodi e pesi dai dati");
+
+    // BOOTSTRAP (data-driven): fissa una volta il minimo barre da storia disponibile
+    g_bootstrapMinBars = ComputeBootstrapMinBars();
+
+    // GUARDRAILS: bootstrap (solo proprietà simbolo + TF abilitati)
+    AutoConfigureGuardrailsBootstrap();
     
     // CACHE COSTANTI SIMBOLO (evita chiamate API ripetute)
     g_pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    // Fallback basato su convenzione mercato (configurabile via input)
+    // Fallback basato su precisione simbolo (AUTO)
     if (g_pointValue <= 0) {
         // Determina se coppia JPY-like dal nome simbolo
         string upperSymbol = _Symbol;
@@ -1348,10 +1745,10 @@ int OnInit()
     NaturalPeriodResult result_D1 = CalculateNaturalPeriodForTF(PERIOD_D1);
     
     // SALVA PERIODI EMPIRICI per uso globale (sostituiscono DEFAULT)
-    g_naturalPeriod_M5 = result_M5.valid ? result_M5.period : BOOTSTRAP_MIN_BARS;
-    g_naturalPeriod_H1 = result_H1.valid ? result_H1.period : BOOTSTRAP_MIN_BARS;
-    g_naturalPeriod_H4 = result_H4.valid ? result_H4.period : BOOTSTRAP_MIN_BARS;
-    g_naturalPeriod_D1 = result_D1.valid ? result_D1.period : BOOTSTRAP_MIN_BARS;
+    g_naturalPeriod_M5 = result_M5.valid ? result_M5.period : GetBootstrapMinBars();
+    g_naturalPeriod_H1 = result_H1.valid ? result_H1.period : GetBootstrapMinBars();
+    g_naturalPeriod_H4 = result_H4.valid ? result_H4.period : GetBootstrapMinBars();
+    g_naturalPeriod_D1 = result_D1.valid ? result_D1.period : GetBootstrapMinBars();
     
     // Base sistema = minimo tra TF attivi (pi reattivo)
     g_naturalPeriod_Min = INT_MAX;  // Sentinella massima
@@ -1359,7 +1756,7 @@ int OnInit()
     if (result_H1.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_H1.period);
     if (result_H4.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_H4.period);
     if (result_D1.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_D1.period);
-    if (g_naturalPeriod_Min == INT_MAX) g_naturalPeriod_Min = BOOTSTRAP_MIN_BARS;  // Fallback empirico
+    if (g_naturalPeriod_Min == INT_MAX) g_naturalPeriod_Min = GetBootstrapMinBars();  // Fallback empirico
     
     // PURO: Disabilita TF senza dati sufficienti
     g_dataReady_M5 = result_M5.valid;
@@ -1377,6 +1774,13 @@ int OnInit()
         Print("[INIT] ERRORE: nessun timeframe ha dati sufficienti - EA non puo operare");
         return INIT_FAILED;
     }
+
+    // GUARDRAILS: raffinamento empirico (dopo stima periodi naturali)
+    AutoConfigureGuardrailsEmpirical();
+
+    // SCORE HISTORY: buffer data-driven (ora con guardrails coerenti)
+    int scoreBase = (g_naturalPeriod_H1 > 0) ? g_naturalPeriod_H1 : GetBootstrapSafeBars();
+    SCORE_HISTORY_MAX = GetDataDrivenBufferSize(scoreBase, 4);
     
     // ---------------------------------------------------------------
     // STEP 2: PESI TF (fully empirical)
@@ -1433,14 +1837,15 @@ int OnInit()
     InitScoreHistoryBuffer();
     if (AutoScoreThreshold) {
         int minSamplesOrganic = GetBufferSmall();
-        int minSamplesForInit = MathMax(minSamplesOrganic, MathMax(16, (int)MathCeil(SCORE_HISTORY_MAX * 0.20)));
+        // Data-driven: campioni minimi per inizializzazione ~ sqrt(N)
+        int minSamplesForInit = MathMax(minSamplesOrganic, (int)MathCeil(MathSqrt((double)MathMax(1, SCORE_HISTORY_MAX))));
         Print("");
         Print("---------------------------------------------------------------");
         Print("SOGLIA SCORE 100% DERIVATA DAI DATI");
         Print("   Formula: threshold = mean_score + stdev_score (con clamp percentili)");
         PrintFormat("   Buffer: %d campioni | Ready dopo %d campioni (~%d%% del buffer)", 
             SCORE_HISTORY_MAX, minSamplesForInit, (int)MathRound(100.0 * minSamplesForInit / SCORE_HISTORY_MAX));
-        Print("   Limiti: P25 <-> P75 (empirici)");
+        PrintFormat("   Limiti: P%.0f <-> P%.0f (empirici)", PercentileLow, PercentileHigh);
         Print("---------------------------------------------------------------");
         Print("");
     } else {
@@ -1520,12 +1925,18 @@ int OnInit()
     g_recentTradesMax = GetDataDrivenBufferSize(baseForTrades, 2);
     
     //  v1.1: Inizializza sistema Otsu  Youden
-    int baseForYouden = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int baseForYouden = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     g_minTradesForYouden = GetDataDrivenBufferSize(baseForYouden, 1);
     g_youdenReady = false;
     g_youdenThreshold = 0.0;
     g_otsuThreshold = 0.0;
     g_lastEntryScore = 0.0;
+
+    // GUARDRAILS: raffinamento finale (dopo che i buffer data-driven sono noti)
+    AutoConfigureGuardrailsAfterBuffers();
+
+    // AUTO: parametri Youden/threshold realmente data-driven (dopo che i buffer empirici sono noti)
+    AutoConfigureOrganicSystemParams();
     
     //  v1.1 FIX: Inizializza mappa ticket  score
     g_openTicketsMax = g_recentTradesMax;  // Stesso buffer size
@@ -1556,8 +1967,8 @@ int OnInit()
         PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1) con exp-decay (half-life=%.1f trade)", g_minTradesForYouden, YoudenHalfLifeTrades);
     else
         PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
-    Print("   Bounds: P25% <-> P75% (empirici)");
-        Print("   Core data-driven dai dati (guardrail Youden configurabili per stabilita')");
+    PrintFormat("   Bounds: P%.0f%% <-> P%.0f%% (empirici)", PercentileLow, PercentileHigh);
+    Print("   Core data-driven dai dati (guardrail Youden auto)");
     Print("---------------------------------------------------------------");
     
     // ---------------------------------------------------------------
@@ -1640,7 +2051,7 @@ void RecalculateOrganicSystem()
         if (result_H1.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_H1.period);
         if (result_H4.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_H4.period);
         if (result_D1.valid) g_naturalPeriod_Min = MathMin(g_naturalPeriod_Min, result_D1.period);
-        if (g_naturalPeriod_Min == INT_MAX) g_naturalPeriod_Min = BOOTSTRAP_MIN_BARS;
+        if (g_naturalPeriod_Min == INT_MAX) g_naturalPeriod_Min = GetBootstrapMinBars();
 
         g_cachedResult_M5 = result_M5;
         g_cachedResult_H1 = result_H1;
@@ -1703,11 +2114,11 @@ void RecalculateOrganicSystem()
         if (g_dataReady_H4) CalculateOrganicPeriodsFromData(PERIOD_H4, g_organic_H4, result_H4.period, weight_H4);
         if (g_dataReady_D1) CalculateOrganicPeriodsFromData(PERIOD_D1, g_organic_D1, result_D1.period, weight_D1);
         
-        // FIX: Controlla se i periodi sono cambiati significativamente (>25%)
+        // FIX: Controlla se i periodi sono cambiati significativamente
         // Se si, ricrea gli handle indicatori con i nuovi periodi
         if (PeriodsChangedSignificantly()) {
             if (g_enableLogsEffective) {
-                Print("[RECALC] Periodi cambiati >25% - Ricreazione handle indicatori...");
+                Print("[RECALC] Periodi cambiati significativamente - Ricreazione handle indicatori...");
             }
             ReleaseIndicators();
             if (!InitializeIndicators()) {
@@ -1922,7 +2333,12 @@ ulong ResolvePositionIdFromDealTicket(ulong dealTicket)
     if (dealTicket == 0) return 0;
 
     datetime toTime = TimeCurrent();
-    datetime fromTime = toTime - 86400 * 3650;  // 10 anni (robusto in backtest)
+    int minSec, maxSec;
+    GetEnabledTFSecondsMinMax(minSec, maxSec);
+    long barsCap = (long)MathMax(1, GetTerminalMaxBarsSafe());
+    long spanSec = (long)MathMax(1, maxSec);
+    long delta = barsCap * spanSec;
+    datetime fromTime = (toTime > (datetime)delta ? (toTime - (datetime)delta) : (datetime)0);
     if (!HistorySelect(fromTime, toTime)) return 0;
 
     if (!HistoryDealSelect(dealTicket)) return 0;
@@ -2245,7 +2661,7 @@ void UpdateDynamicThreshold()
     //  FASE 1: OTSU (warm-up - separazione statistica)
     // Trova la soglia che separa naturalmente gli score in due classi
     // 
-    int minSamplesForOtsu = GetBufferSmall();  // 8 campioni
+    int minSamplesForOtsu = GetBufferSmall();
     
     if (g_scoreHistorySize < minSamplesForOtsu) {
         // Non abbastanza dati per Otsu: usa fallback manuale
@@ -2338,12 +2754,12 @@ void UpdateDynamicThreshold()
     
     // 
     //  SAFETY BOUNDS (data-driven percentili)
-    // Min: P25  25% (sotto questo, troppi segnali)
-    // Max: P75  75% della distribuzione
+    // Min: P{PercentileLow}
+    // Max: P{PercentileHigh}
     // 
-    int minSamplesForBounds = GetBufferSmall();  // 8 campioni minimi
+    int minSamplesForBounds = GetBufferSmall();
     if (g_scoreHistorySize >= minSamplesForBounds) {
-        // Percentili empirici (auto-driven): clamp in [P25, P75]
+        // Percentili empirici (auto-driven): clamp in [P{low}, P{high}]
         double minBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileLow);
         double maxBound = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileHigh);
         
@@ -2353,11 +2769,13 @@ void UpdateDynamicThreshold()
         g_dynamicThreshold = MathMax(minBound, MathMin(maxBound, g_dynamicThreshold));
         
         if (hitFloor || hitCeiling) {
-            thresholdMethod += (hitFloor ? " | FLOOR->P25" : " | CEILING->P75");
+            thresholdMethod += (hitFloor
+                                ? StringFormat(" | FLOOR->P%.0f", PercentileLow)
+                                : StringFormat(" | CEILING->P%.0f", PercentileHigh));
         }
     }
     
-    // Log se cambio significativo (anti-spam): usa una frazione dell'IQR (P75-P25)
+    // Log se cambio significativo (anti-spam): usa una frazione dell'IQR (P{high}-P{low})
     double logChangeThreshold = 0.0;
     if (g_scoreHistorySize >= minSamplesForBounds) {
         double p25 = CalculatePercentile(g_scoreHistory, g_scoreHistorySize, PercentileLow);
@@ -2464,7 +2882,8 @@ void InitReversalDetectors()
         PrintFormat("   Score Momentum buffer: %d | Soglia: mean + stdev", momentumBufferSize);
         PrintFormat("   RSI Divergence: %d swing points | Soglia: mean + stdev (%s)", 
             g_swingsMax, enableRSI ? "ATTIVO" : "disattivo");
-        PrintFormat("   Stochastic Extreme: soglie percentili (P25/P75) (%s)", 
+        PrintFormat("   Stochastic Extreme: soglie percentili (P%.0f/P%.0f) (%s)",
+            PercentileLow, PercentileHigh,
             enableStoch ? "ATTIVO" : "disattivo");
         PrintFormat("   OBV Divergence: lookback ~4 barre (%s)", 
             enableOBV ? "ATTIVO" : "disattivo");
@@ -2499,7 +2918,8 @@ int UpdateScoreMomentum(double currentScore)
         double oldValue = g_momentumHistory[g_momentumHistoryIndex];
         g_momentumSum -= oldValue;
         g_momentumSumSq -= oldValue * oldValue;
-        if (g_momentumSum < -1e10) g_momentumSum = 0;  // Protezione overflow
+        double sumBound = 100.0 * (double)momentumBufferMax * (double)momentumBufferMax;
+        if (g_momentumSum < -sumBound) g_momentumSum = 0.0;  // Protezione overflow
         if (g_momentumSumSq < 0) g_momentumSumSq = 0;
     }
     
@@ -2521,10 +2941,18 @@ int UpdateScoreMomentum(double currentScore)
         double stdev = (variance > 0) ? MathSqrt(variance) : 0.0;
 
         double rawThreshold = mean + stdev;
-        double p50 = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, 50.0);
-        double p95 = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, 95.0);
-        if (p95 > 0.0) rawThreshold = MathMin(p95, rawThreshold);
-        if (p50 > 0.0) rawThreshold = MathMax(p50, rawThreshold);
+        double pMidPct = 0.5 * (PercentileLow + PercentileHigh);
+        double pHiPct = PercentileHigh;
+        if (pHiPct < pMidPct) {
+            double tmp = pHiPct;
+            pHiPct = pMidPct;
+            pMidPct = tmp;
+        }
+
+        double pMid = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, pMidPct);
+        double pHi = CalculatePercentile(g_momentumHistory, g_momentumHistorySize, pHiPct);
+        if (pHi > 0.0) rawThreshold = MathMin(pHi, rawThreshold);
+        if (pMid > 0.0) rawThreshold = MathMax(pMid, rawThreshold);
 
         g_scoreMomentumThreshold = rawThreshold;
         g_momentumThresholdReady = true;
@@ -2553,9 +2981,96 @@ int UpdateScoreMomentum(double currentScore)
 }
 
 //+------------------------------------------------------------------+
+//| Trading seconds by broker sessions (no hardcoded weekend rules)  |
+//+------------------------------------------------------------------+
+datetime GetDayStart(datetime t)
+{
+    MqlDateTime dt;
+    TimeToStruct(t, dt);
+    dt.hour = 0;
+    dt.min = 0;
+    dt.sec = 0;
+    return StructToTime(dt);
+}
+
+datetime AddDays(datetime dayStart, int days)
+{
+    MqlDateTime dt;
+    TimeToStruct(dayStart, dt);
+    dt.day += days;
+    dt.hour = 0;
+    dt.min = 0;
+    dt.sec = 0;
+    return StructToTime(dt);
+}
+
+datetime MakeDateTimeOnDay(datetime dayStart, datetime timeOfDay)
+{
+    MqlDateTime day;
+    TimeToStruct(dayStart, day);
+
+    MqlDateTime tod;
+    TimeToStruct(timeOfDay, tod);
+
+    day.hour = tod.hour;
+    day.min = tod.min;
+    day.sec = tod.sec;
+    return StructToTime(day);
+}
+
+long OverlapSeconds(datetime aFrom, datetime aTo, datetime bFrom, datetime bTo)
+{
+    datetime s = (aFrom > bFrom ? aFrom : bFrom);
+    datetime e = (aTo < bTo ? aTo : bTo);
+    if (e <= s) return 0;
+    return (long)(e - s);
+}
+
+long ComputeTradingSecondsFromSessions(datetime fromTime, datetime toTime)
+{
+    if (toTime <= fromTime) return 0;
+
+    datetime day = GetDayStart(fromTime);
+    datetime endDay = GetDayStart(toTime);
+    long total = 0;
+    bool anySessionFound = false;
+
+    for (datetime d = day; d <= endDay; d = AddDays(d, 1))
+    {
+        datetime nextDay = AddDays(d, 1);
+        MqlDateTime dts;
+        TimeToStruct(d, dts);
+        ENUM_DAY_OF_WEEK dow = (ENUM_DAY_OF_WEEK)dts.day_of_week;
+
+        // Loop sessions until SymbolInfoSessionTrade returns false.
+        for (uint si = 0; ; si++)
+        {
+            datetime sFrom, sTo;
+            if (!SymbolInfoSessionTrade(_Symbol, dow, si, sFrom, sTo))
+                break;
+
+            anySessionFound = true;
+
+            datetime sessFrom = MakeDateTimeOnDay(d, sFrom);
+            datetime sessTo = MakeDateTimeOnDay(d, sTo);
+            if (sessTo <= sessFrom)
+                sessTo = MakeDateTimeOnDay(nextDay, sTo);
+
+            // Clamp to [fromTime, toTime]
+            total += OverlapSeconds(sessFrom, sessTo, fromTime, toTime);
+        }
+    }
+
+    if (!anySessionFound)
+        return -1;
+
+    return total;
+}
+
+//+------------------------------------------------------------------+
 //| AGGIORNA SOGLIA DIVERGENZA DATA-DRIVEN                           |
 //| Traccia storia forze divergenza e calcola: mean + stdev * decay  |
-//| Clamp: [P25 ~ 25%, P62 ~ 62%]                                    |
+//| Clamp: [P{low}, P{high}]                                         |
 //+------------------------------------------------------------------+
 void UpdateDivergenceThreshold(double strength)
 {
@@ -2573,7 +3088,8 @@ void UpdateDivergenceThreshold(double strength)
         double oldValue = g_divergenceHistory[g_divergenceHistoryIndex];
         g_divergenceSum -= oldValue;
         g_divergenceSumSq -= oldValue * oldValue;
-        if (g_divergenceSum < -1e10) g_divergenceSum = 0;  // Protezione drift
+        double sumBound = (double)divergenceBufferMax * (double)divergenceBufferMax;
+        if (g_divergenceSum < -sumBound) g_divergenceSum = 0.0;  // Protezione drift
         if (g_divergenceSumSq < 0) g_divergenceSumSq = 0;
     }
     
@@ -2587,7 +3103,7 @@ void UpdateDivergenceThreshold(double strength)
     if (g_divergenceHistorySize < divergenceBufferMax) g_divergenceHistorySize++;
     
     // Calcola soglia: minimo empirico (buffer + frazione del periodo base), nessun Hurst
-    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     int minSamples = MathMax(4, MathMax(GetBufferSmall(), basePeriod / 4));
     
     if (g_divergenceHistorySize >= minSamples) {
@@ -2631,13 +3147,13 @@ int UpdateRSIDivergence()
     int ratesSize = ArraySize(tfData_H1.rates);
     int rsiSize = ArraySize(tfData_H1.rsi);
     
-    // Servono almeno 16 barre per rilevare swing
+    // Servono abbastanza barre per rilevare swing (data-driven)
     int minBars = GetBufferMedium();  // ~17
     if (ratesSize < minBars || rsiSize < minBars) return 0;
     
     // Lookback per swing detection 100% auto-driven:
     // usa periodo naturale (dati) e buffer size (limiti statistici), senza H.
-    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     int denom = MathMax(1, GetBufferSmall());  // 8
     int swingLookback = MathMax(3, (int)MathRound((double)basePeriod / (double)denom));
     swingLookback = MathMin(swingLookback, MathMax(3, GetBufferMedium() / 2));
@@ -2649,7 +3165,7 @@ int UpdateRSIDivergence()
     double swingLowPrice = 0, swingLowRSI = 0;
     int swingHighBar = 0, swingLowBar = 0;
     
-    // Cerca swing negli ultimi 16 barre
+    // Cerca swing in una finestra data-driven
     for (int i = swingLookback; i < minBars - swingLookback; i++) {
         int idx = ratesSize - 1 - i;  // Indice dalla fine (0 = pi recente)
         if (idx < swingLookback || idx >= ratesSize - swingLookback) continue;
@@ -2850,7 +3366,7 @@ int UpdateStochasticExtreme()
     // Verifica dati validi
     if (stochK <= 0 || stochK >= 100 || stochD <= 0 || stochD >= 100) return 0;
     
-    // SOGLIE 100% DATA-DRIVEN: percentili empirici P25/P75 su Stoch K recente (valori validi 1..99)
+    // SOGLIE 100% DATA-DRIVEN: percentili empirici P{low}/P{high} su Stoch K recente (valori validi 1..99)
     double oversoldLevel = 0.0;
     double overboughtLevel = 0.0;
     double stochVals[];
@@ -2926,12 +3442,12 @@ int UpdateOBVDivergence()
     int ratesSize = ArraySize(tfData_H1.rates);
     int obvSize = ArraySize(tfData_H1.obv);
     
-    // Servono almeno 16 barre
+    // Servono abbastanza barre (data-driven)
     int minBars = GetBufferMedium();  // ~17
     if (ratesSize < minBars || obvSize < minBars) return 0;
     
     // Lookback 100% auto-driven: dipende dal periodo naturale e limiti statistici, senza H
-    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     int denom = MathMax(1, GetBufferSmall());
     int lookback = MathMax(3, (int)MathRound((double)basePeriod / (double)denom));
     lookback = MathMin(lookback, MathMax(3, GetBufferMedium() / 2));
@@ -3124,7 +3640,8 @@ int GetReversalSignal(double &strength, bool updateHistory = true)
             double oldValue = g_reversalStrengthHistory[g_reversalHistoryIndex];
             g_reversalSum -= oldValue;
             g_reversalSumSq -= oldValue * oldValue;
-            if (g_reversalSum < -1e10) g_reversalSum = 0;
+            double sumBound = (double)reversalBufferMax * (double)reversalBufferMax;
+            if (g_reversalSum < -sumBound) g_reversalSum = 0.0;
             if (g_reversalSumSq < 0) g_reversalSumSq = 0;
         }
         
@@ -3138,7 +3655,7 @@ int GetReversalSignal(double &strength, bool updateHistory = true)
         // ---------------------------------------------------------------
         //  CALCOLA SOGLIA DATA-DRIVEN: mean + stdev
         // ---------------------------------------------------------------
-        int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+        int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
         int minSamples = MathMax(4, MathMax(GetBufferSmall(), basePeriod / 4));
         
         if (g_reversalHistorySize >= minSamples) {
@@ -3170,7 +3687,7 @@ int GetReversalSignal(double &strength, bool updateHistory = true)
             } else if (g_enableLogsEffective) {
                 static int reversalLogCount = 0;
                 reversalLogCount++;
-                int logInterval = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+                int logInterval = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
                 if (reversalLogCount % logInterval == 0) {
                     PrintFormat("[REVERSAL] Update #%d: Soglia=%.1f%% (mean=%.1f%% stdev=%.1f%%) | %d campioni",
                         reversalLogCount, g_reversalThreshold * 100, mean * 100, stdev * 100, g_reversalHistorySize);
@@ -3235,12 +3752,12 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     
     //  BOOTSTRAP INIZIALE: se lookback=0, usa minimo statistico (no H-based scaling)
     if (lookback == 0) {
-        lookback = MathMax(BOOTSTRAP_MIN_BARS * 2, GetBufferHuge());
+        lookback = MathMax(GetBootstrapMinBars() * 2, GetBufferHuge());
     }
     
     int barsToRequest = lookback;
     
-    //  Minimo PURO: 8 barre (sotto questo non ha senso statistico)
+    //  Minimo: derivato dal buffer minimo (data-driven)
     int minBarsForAnalysis = GetBufferSmall();
     
     //  DIAGNOSTICA: Controlla quante barre sono disponibili PRIMA di copiare
@@ -3263,10 +3780,10 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     
     if (copied < minBarsForAnalysis) {
         //  BOOTSTRAP DI EMERGENZA: se ci sono poche barre, usa il minimo statistico
-        // ma NON spegnere il TF: assegna periodo=BOOTSTRAP_MIN_BARS
+        // ma NON spegnere il TF: assegna periodo=bootstrapMinBars
         PrintFormat("? [NATURAL] TF %s: copiate %d/%d barre (minimo %d) -> BOOTSTRAP MINIMO, TF ATTIVO", 
             EnumToString(tf), copied, barsToRequest, minBarsForAnalysis);
-        result.period = BOOTSTRAP_MIN_BARS;
+        result.period = GetBootstrapMinBars();
         result.valid = true;
         return result;
     }
@@ -3275,7 +3792,7 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     int barsAvailable = copied;
     
     // maxLag: usa una frazione delle barre disponibili (no H-based scaling)
-    int maxLag = MathMax(BOOTSTRAP_MIN_BARS / 2, barsAvailable / 2);
+    int maxLag = MathMax(GetBootstrapMinBars() / 2, barsAvailable / 2);
     
     // Log solo la prima volta per confermare che i dati storici sono caricati
     static bool loggedOnce_M5 = false, loggedOnce_H1 = false, loggedOnce_H4 = false, loggedOnce_D1 = false;
@@ -3394,14 +3911,15 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     int maxPeriod = maxLag / 2;     // Derivato dalle barre
     naturalPeriod = MathMax(minPeriod, MathMin(maxPeriod, naturalPeriod));
     
-    //  MINIMO PERIODO: almeno BOOTSTRAP_MIN_BARS per stabilit
-    result.period = MathMax(naturalPeriod, BOOTSTRAP_MIN_BARS);
+    //  MINIMO PERIODO: almeno bootstrapMinBars per stabilita'
+    result.period = MathMax(naturalPeriod, GetBootstrapMinBars());
     result.valid = true;
     
     //  AGGIORNA LOOKBACK ADATTIVO per il prossimo calcolo (no H-based scaling)
-    int newLookback = result.period + MathMax(BOOTSTRAP_MIN_BARS, GetBufferHuge());
-    newLookback = MathMax(BOOTSTRAP_MIN_BARS * 2, newLookback);
-    newLookback = MathMin(newLookback, 512);  //  RIDOTTO da 2048 a 512 per stack safety
+    int newLookback = result.period + MathMax(GetBootstrapMinBars(), GetBufferHuge());
+    newLookback = MathMax(GetBootstrapMinBars() * 2, newLookback);
+    // cap tecnico: non oltre meta' delle barre disponibili (evita richieste enormi)
+    newLookback = MathMin(newLookback, MathMax(GetBootstrapMinBars() * 2, barsAvailableTotal / 2));
     
     //  Aggiorna lookback globale
     if (tf == PERIOD_M5) g_lookback_M5 = newLookback;
@@ -3811,16 +4329,14 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     // Struttura multi-scala: frazioni/multipli del ciclo osservato
     
     //  Periodi organici - TUTTI derivati dal periodo naturale e H
-    // Minimi statistici da BOOTSTRAP_MIN_BARS (non arbitrari):
-    // - EMA/RSI: minimo BOOTSTRAP_MIN_BARS/4 (2) per convergere
-    // - MACD/Stoch: minimo BOOTSTRAP_MIN_BARS/2 (4) per segnali stabili
-    // - Trend indicators: minimo BOOTSTRAP_MIN_BARS2 (16) per filtrare rumore
-    int veryFast = (int)MathMax(BOOTSTRAP_MIN_BARS / 4, MathRound(base / 4.0));
-    int fast     = (int)MathMax(BOOTSTRAP_MIN_BARS / 3, MathRound(base / 2.0));
-    int medium   = (int)MathMax(BOOTSTRAP_MIN_BARS / 3, MathRound(base));
-    int slow     = (int)MathMax(BOOTSTRAP_MIN_BARS / 2, MathRound(base * 2.0));
-    int verySlow = (int)MathMax(BOOTSTRAP_MIN_BARS, MathRound(base * 4.0));
-    int longest  = (int)MathMax(BOOTSTRAP_MIN_BARS * 2, MathRound(base * 8.0));
+    // Minimi statistici da bootstrapMinBars (non arbitrari):
+    int bs = GetBootstrapMinBars();
+    int veryFast = (int)MathMax(bs / 4, MathRound(base / 4.0));
+    int fast     = (int)MathMax(bs / 3, MathRound(base / 2.0));
+    int medium   = (int)MathMax(bs / 3, MathRound(base));
+    int slow     = (int)MathMax(bs / 2, MathRound(base * 2.0));
+    int verySlow = (int)MathMax(bs,     MathRound(base * 4.0));
+    int longest  = (int)MathMax(bs * 2, MathRound(base * 8.0));
     
     if (g_enableLogsEffective) {
         PrintFormat("[ORGANIC] TF %s: Natural=%d -> VeryFast=%d Fast=%d Medium=%d Slow=%d VerySlow=%d Longest=%d",
@@ -3909,18 +4425,15 @@ void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 
 //+------------------------------------------------------------------+
 //|  FIX: Verifica se i periodi sono cambiati significativamente    |
-//| Ritorna true se almeno un periodo  cambiato > decay(H)          |
+//| Ritorna true se almeno un periodo e' cambiato oltre soglia      |
 //| In tal caso gli handle indicatori devono essere ricreati          |
 //+------------------------------------------------------------------+
 bool PeriodsChangedSignificantly()
 {
     if (!g_periodsInitialized) return false;  // Primo calcolo, non serve confronto
     
-    //  DATA-DRIVEN: Soglia cambio = decay(H) = 2^(-H) (persistenza sistema)
-    //    Per H=0.5  decay0.707 = 70.7% (molto conservativo)
-    //    Per H=0.7  decay0.616 = 61.6% (trending, meno sensibile)
-    //    Per H=0.3  decay0.812 = 81.2% (mean-reverting, pi sensibile)
-    // Soglia empirica: funzione del buffer minimo (no H-based scaling)
+    //  DATA-DRIVEN: Soglia cambio empirica come funzione del buffer minimo
+    //  (piu' campioni => soglia piu' piccola)
     double changeThreshold = 1.0 / (double)MathMax(4, GetBufferSmall());
     
     // Controlla ogni TF attivo
@@ -4919,7 +5432,7 @@ bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
     
     // FIX: Verifica che i dati non siano corrotti (prezzi validi)
     // Numero barre da verificare: empirico (buffer + frazione del periodo base), nessun Hurst
-    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     int barsToCheck = MathMax(4, MathMax(GetBufferSmall(), basePeriod / 4));
 
     // Se abbiamo meno barre del minimo, rinuncia (policy: SOLO barre chiuse, niente start=0)
@@ -5247,10 +5760,10 @@ void CalculateOrganicValues(TimeFrameData &data, int count, int minBarsRequired)
                 if (data.adx[i] < adx_min) adx_min = data.adx[i];
                 if (data.adx[i] > adx_max) adx_max = data.adx[i];
             }
-            // p25 = min + 25% range, p75 = min + 75% range
+            // Percentili approssimati da min/max usando bounds data-driven
             double adx_range = adx_max - adx_min;
-            data.adx_p25 = adx_min + adx_range * 0.25;
-            data.adx_p75 = adx_min + adx_range * 0.75;
+            data.adx_p25 = adx_min + adx_range * (PercentileLow / 100.0);
+            data.adx_p75 = adx_min + adx_range * (PercentileHigh / 100.0);
             
             if (g_enableLogsEffective) {
                 PrintFormat("[ORGANIC] Fallback data-driven: RSI[%.1f%.1f] Stoch[%.1f%.1f] ADX[%.1f-%.1f]",
@@ -5687,7 +6200,7 @@ void OnTick()
     if (g_enableLogsEffective) Print("[DATA] Caricamento dati multi-timeframe in corso...");
     
     // CHECK CACHE DATI TF - Ricarica solo se necessario
-    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : BOOTSTRAP_MIN_BARS;
+    int basePeriod = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
     int tfDataReloadDivisor = MathMax(2, (int)MathRound((double)basePeriod / 4.0));
     int tfDataReloadInterval = MathMax(1, RecalcEveryBars / tfDataReloadDivisor);  // Reload dinamico
     bool shouldReloadTFData = false;
@@ -5947,7 +6460,7 @@ void OnTick()
         Print("[TRADE] Elaborazione completata");
         Print("");
     }
-}
+}  // Fine OnTick()
 
 //+------------------------------------------------------------------+
 //| Logica di trading principale                                     |
@@ -6088,7 +6601,6 @@ void ExecuteTradingLogic()
             }
         }
     }
-    // FIX: Rimosso log "Nessun segnale - in attesa..." - troppo verboso (ogni 5 min)
 }
 
 //+------------------------------------------------------------------+
@@ -6477,9 +6989,7 @@ int ExecuteVotingLogic()
     if (g_vote_H4_active) totalScore += scoreH4;
     if (g_vote_D1_active) totalScore += scoreD1;
     
-    // 
     //  DETECTOR INVERSIONE: Aggiorna tutti i segnali MEAN-REVERSION
-    // 
     int momentumSignal = UpdateScoreMomentum(totalScore);
     int divergenceSignal = UpdateRSIDivergence();
     
@@ -6487,16 +6997,10 @@ int ExecuteVotingLogic()
     int stochExtremeSignal = UpdateStochasticExtreme();
     int obvDivergenceSignal = UpdateOBVDivergence();
     
-    // 
-    // v1.1: MEAN-REVERSION = UN SOLO VOTO COMBINATO
     // Combina RSI + Stochastic + OBV in un UNICO segnale data-driven
     // Poi applica questo voto a OGNI TIMEFRAME attivo
-    // 
-    
-    // STEP 1: Calcola segnale combinato (gia fatto in GetReversalSignal)
-    // Ma qui vogliamo la versione semplificata per il voto
-    double meanRevCombinedStrength = 0.0;
     int meanRevCombinedSignal = 0;  // +1=BUY, -1=SELL, 0=NEUTRO
+    double meanRevCombinedStrength = 0.0;  // Forza del segnale combinato [0-1]
     
     // Pesi uguali (no H-based weighting)
     double w_rsi = 1.0;
@@ -6555,7 +7059,8 @@ int ExecuteVotingLogic()
             double oldV = s_meanRevHist[s_meanRevIdx];
             s_meanRevSum -= oldV;
             s_meanRevSumSq -= oldV * oldV;
-            if (s_meanRevSum < -1e10) s_meanRevSum = 0.0;
+            double sumBound = (double)meanRevHistMax * (double)meanRevHistMax;
+            if (s_meanRevSum < -sumBound) s_meanRevSum = 0.0;
             if (s_meanRevSumSq < 0.0) s_meanRevSumSq = 0.0;
         }
 
@@ -7340,7 +7845,7 @@ void CheckEarlyExitOnReversal()
 
 //+------------------------------------------------------------------+
 //| Stop loss temporale su posizioni aperte                          |
-//|  FIX: Esclude weekend dal conteggio tempo                       |
+//|  FIX: Usa sessioni broker per conteggio tempo trading           |
 //+------------------------------------------------------------------+
 void CheckAndCloseOnTimeStop()
 {
@@ -7367,32 +7872,18 @@ void CheckAndCloseOnTimeStop()
         if (limitMinutes <= 0) continue; // Nessun limite per questo lato
         
         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-        
-        // FIX: Calcola tempo di TRADING effettivo (escludi weekend)
-        // Mercato forex: chiude venerdi' ~22:00 UTC, apre domenica ~22:00 UTC
+
+        // Calcola tempo di TRADING effettivo usando le sessioni del broker.
+        // Fallback: se le sessioni non sono disponibili, usa il tempo totale.
+        long sessSeconds = ComputeTradingSecondsFromSessions(openTime, now);
         long totalSeconds = (long)(now - openTime);
-        
-        // Conta i giorni di weekend nel periodo con precisione migliorata
-        datetime checkTime = openTime;
-        int weekendSeconds = 0;
-        while (checkTime < now) {
-            MqlDateTime dt;
-            TimeToStruct(checkTime, dt);
-            // Sabato intero = 24h non trading
-            if (dt.day_of_week == 6) {
-                weekendSeconds += 86400;
-            }
-            // Domenica: solo prime ~22 ore non trading (mercato apre ~22:00 UTC)
-            else if (dt.day_of_week == 0) {
-                weekendSeconds += 79200;  // 22 ore = 22 * 3600
-            }
-            // Venerdi': ultime ~2 ore non trading (mercato chiude ~22:00 UTC)
-            // Approssimazione conservativa: non contiamo per evitare complessita'
-            checkTime += 86400;  // Avanza di un giorno
+        int tradingSeconds = (int)MathMax(0, (sessSeconds >= 0 ? sessSeconds : totalSeconds));
+
+        static bool s_warnedSessionFallback = false;
+        if (sessSeconds < 0 && !s_warnedSessionFallback) {
+            PrintFormat("INFO: broker sessions unavailable for %s; time-stop uses wall-clock elapsed time.", _Symbol);
+            s_warnedSessionFallback = true;
         }
-        
-        // Sottrai tempo weekend
-        int tradingSeconds = (int)MathMax(0, totalSeconds - weekendSeconds);
         int maxLifetimeSeconds = limitMinutes * 60;
         if (tradingSeconds < maxLifetimeSeconds) continue;
         
@@ -7410,7 +7901,7 @@ void CheckAndCloseOnTimeStop()
         
         if (trade.PositionClose(ticket)) {
             closedCount++;
-            PrintFormat("[TIME STOP] ? Chiusa posizione #%I64u %s (Lot: %.2f, P/L: %.2f)", 
+            PrintFormat("[TIME STOP] OK Chiusa posizione #%I64u %s (Lot: %.2f, P/L: %.2f)", 
                 ticket,
                 type == POSITION_TYPE_BUY ? "BUY" : "SELL",
                 volume,
