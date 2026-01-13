@@ -52,7 +52,7 @@ void ExecuteTradingLogic();
 // +---------------------------------------------------------------------------+
 input group "--- GENERALE ---"
 input bool   enableTrading        = true;       // Abilita trading (false = solo analisi)
-input int    MaxOpenTrades        = 500;        // Massimo posizioni aperte
+input int    MaxOpenTrades        = 10;         // Massimo posizioni aperte (RIDOTTO per PC deboli)
 input double MaxSpread            = 35;         // Spread massimo in punti
 input uint   MaxSlippage          = 40;         // Slippage max in punti
 input int    MagicNumber          = 123456;     // Magic Number (base, viene modificato per simbolo)
@@ -98,6 +98,17 @@ int CalculateUniqueMagicNumber()
 int g_uniqueMagicNumber = 0;
 
 // +---------------------------------------------------------------------------+
+//                    MEMORIA E PERFORMANCE (PER TIMEFRAME)                 
+// +---------------------------------------------------------------------------+
+input group "--- CONFIGURAZIONE MEMORIA (Giorni Storia per Timeframe) ---"
+input int    WindowDays_M5      = 3;        // M5: Giorni storia (3-7 consigliato, max dati recenti)
+input int    WindowDays_H1      = 7;        // H1: Giorni storia (7-14 consigliato, trend medio)
+input int    WindowDays_H4      = 14;       // H4: Giorni storia (14-30 consigliato, trend robusto)
+input int    WindowDays_D1      = 30;       // D1: Giorni storia (30-90 consigliato, trend lungo)
+input double MaxLagFraction     = 0.15;     // MaxLag autocorr = % barre (0.10-0.20, più alto=più lento)
+input int    MaxLagAbsolute     = 150;      // MaxLag massimo assoluto (50-200, limita calcoli pesanti)
+
+// +---------------------------------------------------------------------------+
 //                          PARAMETRI BUY                                   
 // +---------------------------------------------------------------------------+
 input group "--- ORDINI BUY ---"
@@ -122,6 +133,18 @@ input double TakeProfitPriceSell  = 0.0;        // TP SELL prezzo fisso (priorit
 input int    SellTimeStopMinutes  = 7200;       // Stop loss temporale SELL (0=disattivato)
 input int    SellTrailingStartPoints = 200;     // SELL Trailing: attiva dopo X punti profitto (0=disattivato)
 input int    SellTrailingStepPoints  = 100;     // SELL Trailing: mantieni SL a Y punti dal prezzo corrente
+
+// +---------------------------------------------------------------------------+
+//                        USCITE / GESTIONE POSIZIONI
+// +---------------------------------------------------------------------------+
+input group "--- USCITE / GESTIONE POSIZIONI ---"
+input bool   EnableEarlyExitOnReversal = true;  // Chiude a mercato posizioni in perdita su reversal forte (false=disattiva)
+input bool   EarlyExitCheckOnNewM5BarOnly = true; // Valuta early-exit solo a nuova barra M5 (riduce chiusure su noise intra-bar)
+input int    EarlyExitConfirmBars       = 2;    // Reversal deve persistere per N barre M5 (1=immediato)
+input int    EarlyExitMinPositionAgeMinutes = 10; // Non chiudere prima di N minuti dall'apertura (0=disattivato)
+input double EarlyExitReversalStrengthOverride = 0.0; // 0=AUTO (data-driven), altrimenti soglia manuale 0..1
+input double EarlyExitMinLossPipsOverride   = 0.0; // AUTO se 0: soglia loss minima in pips (override)
+input double EarlyExitMinLossAtrFracOverride = 0.0; // AUTO se 0: soglia loss come frazione ATR (override)
 
 // +---------------------------------------------------------------------------+
 //                      TIMEFRAME & SISTEMA VOTO                            
@@ -255,8 +278,9 @@ input bool   enableOBV       = true;    // OBV: divergenze volume/prezzo -> voto
 // | MEAN-REVERSION: RSI/Stoch/OBV votano nella direzione dell'inversione       |
 // +---------------------------------------------------------------------------+
 //--- SISTEMA ORGANICO ---
-bool   AutoScoreThreshold = true;         // AUTO: forzato a true da AutoConfigureOrganicSystemParams()
-double ScoreThreshold     = 50.0;         // Usato solo se AutoScoreThreshold=false (in pratica non usato)
+input bool   AutoScoreThreshold = false;  // Soglia automatica (OTSU->YOUDEN)? Se false, usa ScoreThreshold manuale
+input double ScoreThreshold     = 50.0;   // Soglia manuale (usata solo se AutoScoreThreshold=false)
+input bool   EnableEarlyEntryBelowThreshold = false; // Permette "ENTRY ANTICIPATO" (reversal forte) anche sotto soglia score
 
 bool   EnableYoudenExpDecay = true;        // AUTO: impostato da AutoConfigureOrganicSystemParams()
 double YoudenHalfLifeTrades = 0.0;         // AUTO: half-life (trade) derivata da buffer/periodi empirici
@@ -276,9 +300,9 @@ int    RecalcEveryBars    = 0;            // Ricalcolo ogni N barre (0=ogni barr
 //+------------------------------------------------------------------+
 void AutoConfigureOrganicSystemParams()
 {
-    // Soglia score: sempre automatica (Otsu -> Youden)
-    AutoScoreThreshold = true;
-    ScoreThreshold = 50.0;
+    // Soglia score: rispetta scelta utente (AutoScoreThreshold input)
+    // Se automatica: calcola parametri Youden
+    // Se manuale: usa ScoreThreshold direttamente
 
     // Half-life: la deriviamo dai buffer empirici (già data-driven dai periodi naturali)
     // - g_recentTradesMax: finestra trade recente (data-driven)
@@ -517,9 +541,19 @@ void AutoConfigureGuardrailsBootstrap()
     DataDrivenRatioMax = tfSpan;
     DataDrivenRatioMin = 1.0 / tfSpan;
 
-    // buffer clamp: dipende dalla profondità storica disponibile (tecnica)
-    const int maxBars = GetTerminalMaxBarsSafe();
-    DataDrivenBufferMax = (int)MathMax(1, maxBars);
+    // buffer clamp: dipende dai TF attivi (proporzionale!)
+    // Più TF attivi = più dati cross-correlati = buffer più grandi giustificati
+    int activeTfCount = 0;
+    if (EnableVote_M5) activeTfCount++;
+    if (EnableVote_H1) activeTfCount++;
+    if (EnableVote_H4) activeTfCount++;
+    if (EnableVote_D1) activeTfCount++;
+    if (activeTfCount == 0) activeTfCount = 1;
+    
+    // Buffer max scalato: 150 per 1 TF, 600 per 4 TF (proporzionale alla complessità)
+    const int BUFFER_BASE_PER_TF = 150;
+    DataDrivenBufferMax = BUFFER_BASE_PER_TF * activeTfCount;
+    
     DataDrivenBufferMin = (int)MathMax(2, MathCeil(MathSqrt((double)MathMax(1, GetBootstrapMinBars()))));
     DataDrivenBufferMax = (int)MathMax(DataDrivenBufferMin, DataDrivenBufferMax);
     BufferXLargeMin = (int)MathMin(
@@ -671,6 +705,20 @@ int GetDataDrivenBufferSize(int basePeriod, int exponent)
     int out = (int)MathRound(size);
     out = MathMax(DataDrivenBufferMin, out);
     out = MathMin(out, DataDrivenBufferMax);
+    
+    // HARD CAP PROPORZIONALE basato su TF disponibili (intelligente!)
+    // Più TF attivi = buffer più grandi (hanno più dati cross-TF)
+    int activeTfCount = 0;
+    if (EnableVote_M5) activeTfCount++;
+    if (EnableVote_H1) activeTfCount++;
+    if (EnableVote_H4) activeTfCount++;
+    if (EnableVote_D1) activeTfCount++;
+    if (activeTfCount == 0) activeTfCount = 1;
+    
+    // Buffer cap scalato: 100 per 1 TF, 400 per 4 TF
+    int hardCap = 100 * activeTfCount;
+    out = MathMin(out, hardCap);
+    
     return out;
 }
 
@@ -723,6 +771,88 @@ int GetBootstrapMinBars()
     return ComputeBootstrapMinBars();
 }
 
+//+------------------------------------------------------------------+
+//| CALCOLA LIMITI PROPORZIONALI AL TIMEFRAME (non arbitrari!)      |
+//| Finestra temporale fissa (giorni) -> barre diverse per TF       |
+//| Esempio: 7 giorni = 2016 barre M5, 168 barre H1, 7 barre D1     |
+//+------------------------------------------------------------------+
+struct TimeFrameLimits {
+    int maxBars;           // Max barre da caricare per questo TF
+    int maxLagAuto;        // Max lag per autocorrelazione
+    int bufferScale;       // Fattore scala buffer (1-4)
+    int minBarsBootstrap;  // Minimo barre bootstrap
+};
+
+TimeFrameLimits GetTimeFrameLimits(ENUM_TIMEFRAMES tf)
+{
+    TimeFrameLimits limits;
+    
+    // PARAMETRI DA INPUT (configurabili dall'utente!)
+    int windowDays = 7;  // Default fallback
+    
+    // Seleziona giorni specifici per questo TF (input configurabili)
+    if (tf == PERIOD_M5 || tf == PERIOD_M1) {
+        windowDays = MathMax(1, WindowDays_M5);
+    } else if (tf == PERIOD_M15 || tf == PERIOD_M30 || tf == PERIOD_H1) {
+        windowDays = MathMax(1, WindowDays_H1);
+    } else if (tf == PERIOD_H2 || tf == PERIOD_H3 || tf == PERIOD_H4) {
+        windowDays = MathMax(1, WindowDays_H4);
+    } else {  // H6, H8, H12, D1, W1, MN1
+        windowDays = MathMax(1, WindowDays_D1);
+    }
+    
+    // Parametri autocorrelazione da input (clampati per sicurezza)
+    double maxLagFraction = MathMax(0.05, MathMin(0.30, MaxLagFraction));
+    int maxLagAbsolute = MathMax(10, MathMin(500, MaxLagAbsolute));
+    const int MIN_LAG_ABSOLUTE = 5;         // Minimo lag assoluto (tecnico)
+    
+    // Calcola minuti per barra di questo TF
+    int tfMinutes = PeriodSeconds(tf) / 60;
+    if (tfMinutes <= 0) tfMinutes = 1;
+    
+    // Calcola barre necessarie per coprire windowDays (specifico per TF)
+    int minutesInWindow = windowDays * 24 * 60;
+    int barsForWindow = minutesInWindow / tfMinutes;
+    
+    // HARD CAP per sicurezza memoria (proporzionale al TF!)
+    // TF piccoli (M5) possono gestire più barre, TF grandi (D1) meno
+    int hardCapByTF;
+    if (tf <= PERIOD_M15) {
+        hardCapByTF = 2000;      // M1, M5, M15: fino a 2000 barre
+    } else if (tf <= PERIOD_H1) {
+        hardCapByTF = 500;       // M30, H1: fino a 500 barre
+    } else if (tf <= PERIOD_H4) {
+        hardCapByTF = 400;       // H2, H3, H4: fino a 400 barre (evita blocchi su periodi >200)
+    } else {
+        hardCapByTF = 300;       // H6, H8, D1, W1: fino a 300 barre (D1=50 blocca min_bars_required tipici)
+    }
+    
+    // Applica hard cap
+    limits.maxBars = MathMin(barsForWindow, hardCapByTF);
+    
+    // MaxLag proporzionale alle barre (cerca cicli dentro la finestra)
+    // Usa parametri configurabili dall'input!
+    limits.maxLagAuto = (int)(limits.maxBars * maxLagFraction);
+    limits.maxLagAuto = MathMax(MIN_LAG_ABSOLUTE, MathMin(limits.maxLagAuto, maxLagAbsolute));
+    
+    // Buffer scale: TF più grandi hanno buffer più grandi (relativamente)
+    // M5 = 1x, H1 = 2x, H4 = 3x, D1 = 4x
+    if (tf <= PERIOD_M15) {
+        limits.bufferScale = 1;
+    } else if (tf <= PERIOD_H1) {
+        limits.bufferScale = 2;
+    } else if (tf <= PERIOD_H4) {
+        limits.bufferScale = 3;
+    } else {
+        limits.bufferScale = 4;
+    }
+    
+    // Bootstrap minimo: 10% delle barre max, almeno 10
+    limits.minBarsBootstrap = MathMax(10, limits.maxBars / 10);
+    
+    return limits;
+}
+
 int GetBufferSmall()   
 { 
     int base = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min : GetBootstrapMinBars();
@@ -757,6 +887,57 @@ int GetBufferHuge()
     if(minHuge <= 0)
         minHuge = MathMax(GetBootstrapMinBars() * 2, 1);
     return MathMax(result, minHuge);
+}
+
+//+------------------------------------------------------------------+
+//| CALCOLA BARRE DA CARICARE - PROPORZIONALE AL TIMEFRAME          |
+//| Usa GetTimeFrameLimits() per limiti intelligenti per TF         |
+//| M5 può gestire 2000 barre, D1 solo 50 -> stessa finestra tempo! |
+//+------------------------------------------------------------------+
+int CalculateBarsToLoad(ENUM_TIMEFRAMES tf, const OrganicPeriods &organic)
+{
+    // Ottieni limiti proporzionali per questo TF specifico
+    TimeFrameLimits limits = GetTimeFrameLimits(tf);
+    
+    // STEP 1: Calcola barre basate su periodo naturale (se disponibile)
+    int barsNeeded = limits.maxBars;  // Default: usa max per questo TF
+    
+    if (organic.naturalPeriod > 0) {
+        // Carica almeno 4 cicli naturali completi (per statistiche robuste)
+        int barsForCycles = organic.naturalPeriod * 4;
+        barsNeeded = MathMin(barsForCycles, limits.maxBars);
+    }
+    
+    // STEP 2: Assicura minimo statistico (almeno 3 periodi naturali)
+    int minBarsForStats = MathMax(limits.minBarsBootstrap, organic.naturalPeriod * 3);
+    barsNeeded = MathMax(barsNeeded, minBarsForStats);
+
+    // STEP 2b: Assicura minimo richiesto dai periodi organici
+    // Se min_bars_required e' calcolato (es. 153), dobbiamo caricare ALMENO quello,
+    // altrimenti CalculateOrganicValues() andra' in loop di "Barre insufficienti".
+    if (organic.min_bars_required > 0) {
+        barsNeeded = MathMax(barsNeeded, organic.min_bars_required);
+    }
+    
+    // STEP 3: Applica cap proporzionale al TF, ma NON sotto il minimo richiesto dai calcoli
+    // (altrimenti H4/D1 restano bloccati: es. maxBars=84/50 ma min_bars_required=153)
+    int maxBarsCap = limits.maxBars;
+    if (organic.min_bars_required > 0) {
+        maxBarsCap = MathMax(maxBarsCap, organic.min_bars_required);
+    }
+    barsNeeded = MathMin(barsNeeded, maxBarsCap);
+    
+    // STEP 4: Verifica barre disponibili (safety)
+    int barsAvailable = iBars(_Symbol, tf);
+    if (barsAvailable > 0 && barsNeeded > barsAvailable - 10) {
+        // Usa tutte le barre disponibili meno margine sicurezza
+        barsNeeded = MathMax(10, barsAvailable - 10);
+    }
+    
+    // STEP 5: Bootstrap minimo garantito (proporzionale al TF)
+    barsNeeded = MathMax(barsNeeded, MathMin(limits.minBarsBootstrap, barsAvailable - 10));
+    
+    return barsNeeded;
 }
 
 // BOOTSTRAP_SAFE_BARS calcolato dinamicamente in OnInit come g_naturalPeriod_Min * 2
@@ -801,6 +982,11 @@ int    g_empiricalPeriod_Min = 0;            // Minimo tra tutti i periodi attiv
 bool   g_cacheValid = false;                 // Cache valida?
 bool   g_tfDataCacheValid = false;           // Cache dati TF valida?
 int    g_tfDataRecalcCounter = 0;            // Contatore per reload dati TF
+
+//  DIAGNOSTICA PERFORMANCE: Contatori ROLLING vs RELOAD FULL
+int    g_rollingUpdateCount = 0;             // Contatore UPDATE ROLLING (shift+append 1 barra)
+int    g_reloadFullCount = 0;                // Contatore RELOAD FULL (carica tutto storico)
+int    g_cacheHitCount = 0;                  // Contatore CACHE HIT (skip, nessuna operazione)
 
 //  FIX: Variabili per rilevamento gap di prezzo e invalidazione cache
 double g_lastCachePrice = 0.0;               // Ultimo prezzo quando cache valida
@@ -995,6 +1181,25 @@ bool IsPositionOpenById(ulong positionId)
         if (!PositionSelectByTicket(ticket)) continue;
         long ident = PositionGetInteger(POSITION_IDENTIFIER);
         if (ident > 0 && (ulong)ident == positionId) return true;
+    }
+    return false;
+}
+
+bool TryGetPositionTicketByIdentifier(ulong positionId, ulong &ticketOut)
+{
+    ticketOut = 0;
+    if (positionId == 0) return false;
+
+    int total = PositionsTotal();
+    for (int i = total - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+        if (!PositionSelectByTicket(ticket)) continue;
+        long ident = PositionGetInteger(POSITION_IDENTIFIER);
+        if (ident > 0 && (ulong)ident == positionId) {
+            ticketOut = ticket;
+            return true;
+        }
     }
     return false;
 }
@@ -1681,6 +1886,44 @@ bool g_vote_D1_active = false;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+    // CONTROLLO SICUREZZA PC: Verifica memoria disponibile prima di partire
+    // Se il terminale ha troppo poca RAM disponibile, avvisa l'utente
+    long memoryUsed = TerminalInfoInteger(TERMINAL_MEMORY_USED);
+    long memoryLimit = TerminalInfoInteger(TERMINAL_MEMORY_TOTAL);
+    long memoryAvailable = memoryLimit - memoryUsed;
+    
+    PrintFormat("[MEMORY CHECK] Memoria: Usata=%d MB, Disponibile=%d MB, Limite=%d MB",
+        memoryUsed / (1024*1024), memoryAvailable / (1024*1024), memoryLimit / (1024*1024));
+    
+    // Se meno di 100 MB disponibili, avvisa (ma non bloccare)
+    if (memoryAvailable < 100 * 1024 * 1024) {
+        PrintFormat("? [MEMORY WARNING] Memoria disponibile bassa (%d MB). Il PC potrebbe rallentare!",
+            memoryAvailable / (1024*1024));
+    }
+    
+    // LOG CONFIGURAZIONE MEMORIA (mostra giorni configurati per TF)
+    Print("---------------------------------------------------------------");
+    Print("CONFIGURAZIONE MEMORIA (Giorni Storia per Timeframe):");
+    if (EnableVote_M5) {
+        TimeFrameLimits lim_M5 = GetTimeFrameLimits(PERIOD_M5);
+        PrintFormat("  M5:  %d giorni = ~%d barre (maxLag=%d)", WindowDays_M5, lim_M5.maxBars, lim_M5.maxLagAuto);
+    }
+    if (EnableVote_H1) {
+        TimeFrameLimits lim_H1 = GetTimeFrameLimits(PERIOD_H1);
+        PrintFormat("  H1:  %d giorni = ~%d barre (maxLag=%d)", WindowDays_H1, lim_H1.maxBars, lim_H1.maxLagAuto);
+    }
+    if (EnableVote_H4) {
+        TimeFrameLimits lim_H4 = GetTimeFrameLimits(PERIOD_H4);
+        PrintFormat("  H4:  %d giorni = ~%d barre (maxLag=%d)", WindowDays_H4, lim_H4.maxBars, lim_H4.maxLagAuto);
+    }
+    if (EnableVote_D1) {
+        TimeFrameLimits lim_D1 = GetTimeFrameLimits(PERIOD_D1);
+        PrintFormat("  D1:  %d giorni = ~%d barre (maxLag=%d)", WindowDays_D1, lim_D1.maxBars, lim_D1.maxLagAuto);
+    }
+    PrintFormat("  MaxLag: %.1f%% barre (max assoluto=%d)", MaxLagFraction*100, MaxLagAbsolute);
+    Print("---------------------------------------------------------------");
+    Print("");
+    
     // RILEVAMENTO BACKTEST E OTTIMIZZAZIONE AUTOMATICA
     g_isBacktest = (bool)MQLInfoInteger(MQL_TESTER);
     g_enableLogsEffective = EnableLogs && !g_isBacktest;
@@ -1960,15 +2203,22 @@ int OnInit()
     //  v1.1: Log sistema Otsu  Youden
     Print("");
     Print("---------------------------------------------------------------");
-    Print("SOGLIA ADATTIVA: OTSU -> YOUDEN (100% DATA-DRIVEN)");
-    Print("---------------------------------------------------------------");
-    PrintFormat("   Fase 1 (warm-up): OTSU - separazione bimodale score");
-    if (EnableYoudenExpDecay && YoudenHalfLifeTrades > 0.0)
-        PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1) con exp-decay (half-life=%.1f trade)", g_minTradesForYouden, YoudenHalfLifeTrades);
-    else
-        PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
-    PrintFormat("   Bounds: P%.0f%% <-> P%.0f%% (empirici)", PercentileLow, PercentileHigh);
-    Print("   Core data-driven dai dati (guardrail Youden auto)");
+    if (AutoScoreThreshold) {
+        Print("SOGLIA ADATTIVA: OTSU -> YOUDEN (100% DATA-DRIVEN)");
+        Print("---------------------------------------------------------------");
+        PrintFormat("   Fase 1 (warm-up): OTSU - separazione bimodale score");
+        if (EnableYoudenExpDecay && YoudenHalfLifeTrades > 0.0)
+            PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1) con exp-decay (half-life=%.1f trade)", g_minTradesForYouden, YoudenHalfLifeTrades);
+        else
+            PrintFormat("   Fase 2 (>=%d trade): YOUDEN - massimizza (TPR+TNR-1)", g_minTradesForYouden);
+        PrintFormat("   Bounds: P%.0f%% <-> P%.0f%% (empirici)", PercentileLow, PercentileHigh);
+        Print("   Core data-driven dai dati (guardrail Youden auto)");
+    } else {
+        Print("SOGLIA MANUALE (FISSA)");
+        Print("---------------------------------------------------------------");
+        PrintFormat("   Soglia fissa: %.1f%% (configurata dall'utente)", ScoreThreshold);
+        Print("   AutoScoreThreshold=false - nessun adattamento dinamico");
+    }
     Print("---------------------------------------------------------------");
     
     // ---------------------------------------------------------------
@@ -1993,6 +2243,19 @@ int OnInit()
             StateLabel(EnableVote_H1),
             StateLabel(EnableVote_H4),
             StateLabel(EnableVote_D1));
+        
+        // Log TIME-BASED WINDOW diagnostico (valori calcolati per ogni TF)
+        // Mostra le barre che verranno caricate per ogni timeframe
+        int testBarsM5 = (g_dataReady_M5) ? CalculateBarsToLoad(PERIOD_M5, g_organic_M5) : 0;
+        int testBarsH1 = (g_dataReady_H1 && EnableVote_H1) ? CalculateBarsToLoad(PERIOD_H1, g_organic_H1) : 0;
+        int testBarsH4 = (g_dataReady_H4 && EnableVote_H4) ? CalculateBarsToLoad(PERIOD_H4, g_organic_H4) : 0;
+        int testBarsD1 = (g_dataReady_D1 && EnableVote_D1) ? CalculateBarsToLoad(PERIOD_D1, g_organic_D1) : 0;
+        
+        int naturalMins = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min * PeriodSeconds(PERIOD_M5) / 60 : 1440;
+        PrintFormat("[INIT] TIME-BASED WINDOW: natural=%dmin x 4 = %dmin (%.1fh)",
+            naturalMins, naturalMins * 4, (naturalMins * 4) / 60.0);
+        PrintFormat("[INIT] Barre calcolate per TF: M5=%d | H1=%d | H4=%d | D1=%d (memory-safe)",
+            testBarsM5, testBarsH1, testBarsH4, testBarsD1);
     }
     
     return INIT_SUCCEEDED;
@@ -3752,7 +4015,7 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     
     //  BOOTSTRAP INIZIALE: se lookback=0, usa minimo statistico (no H-based scaling)
     if (lookback == 0) {
-        lookback = MathMax(GetBootstrapMinBars() * 2, GetBufferHuge());
+        lookback = MathMax(GetBootstrapMinBars() * 4, GetBufferHuge());  // *4 per uscire dal bootstrap
     }
     
     int barsToRequest = lookback;
@@ -3791,8 +4054,15 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     // FIX: barsAvailable = numero EFFETTIVO di barre copiate (non Bars()!)
     int barsAvailable = copied;
     
-    // maxLag: usa una frazione delle barre disponibili (no H-based scaling)
-    int maxLag = MathMax(GetBootstrapMinBars() / 2, barsAvailable / 2);
+    // maxLag: PROPORZIONALE AL TIMEFRAME (intelligente, non arbitrario!)
+    // M5 può cercare cicli più lunghi (più lag), D1 cerca cicli più corti (meno lag)
+    TimeFrameLimits limits = GetTimeFrameLimits(tf);
+    int maxLag = limits.maxLagAuto;
+    
+    // Adatta al numero effettivo di barre disponibili (usa parametro configurabile)
+    double maxLagFrac = MathMax(0.05, MathMin(0.30, MaxLagFraction));  // Clamp sicurezza
+    maxLag = MathMin(maxLag, (int)(barsAvailable * maxLagFrac));
+    maxLag = MathMax(12, maxLag);  // Minimo 12 lag per trovare cicli significativi
     
     // Log solo la prima volta per confermare che i dati storici sono caricati
     static bool loggedOnce_M5 = false, loggedOnce_H1 = false, loggedOnce_H4 = false, loggedOnce_D1 = false;
@@ -3898,9 +4168,10 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
         naturalPeriod = FindAutocorrelationMinimum(rates, copied, maxLag);
         
         if (naturalPeriod == 0) {
-            // Derivato dalle barre disponibili: maxLag / 2
-            naturalPeriod = maxLag / 2;
-            PrintFormat("[NATURAL] TF %s: nessun decay trovato, uso maxLag/2=%d", 
+            // Usa valore ragionevole: max tra maxLag/2 e bootstrap minimo
+            int bootstrapMin = GetBootstrapMinBars();
+            naturalPeriod = MathMax(maxLag / 2, bootstrapMin);
+            PrintFormat("[NATURAL] TF %s: nessun decay trovato, uso max(maxLag/2, bootstrap)=%d", 
                 EnumToString(tf), naturalPeriod);
         }
     }
@@ -3918,8 +4189,8 @@ NaturalPeriodResult CalculateNaturalPeriodForTF(ENUM_TIMEFRAMES tf)
     //  AGGIORNA LOOKBACK ADATTIVO per il prossimo calcolo (no H-based scaling)
     int newLookback = result.period + MathMax(GetBootstrapMinBars(), GetBufferHuge());
     newLookback = MathMax(GetBootstrapMinBars() * 2, newLookback);
-    // cap tecnico: non oltre meta' delle barre disponibili (evita richieste enormi)
-    newLookback = MathMin(newLookback, MathMax(GetBootstrapMinBars() * 2, barsAvailableTotal / 2));
+    // Cap intelligente: usa i limiti TF-proportional invece di cap fisso
+    newLookback = MathMin(newLookback, limits.maxBars);
     
     //  Aggiorna lookback globale
     if (tf == PERIOD_M5) g_lookback_M5 = newLookback;
@@ -4324,6 +4595,14 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     // ---------------------------------------------------------------
     double base = (double)naturalPeriod;
     
+    //  FIX CRITICO: Limita i periodi al numero di barre disponibili
+    // Evita "array out of range" quando gli indicatori richiedono pi barre di quelle disponibili
+    int maxBarsAvailable = Bars(_Symbol, tf);
+    if (maxBarsAvailable <= 0) maxBarsAvailable = 1000; // Fallback ragionevole
+    
+    // Usa 80% delle barre disponibili come limite massimo (20% margin di sicurezza)
+    int maxPeriodSafe = (int)(maxBarsAvailable * 0.8);
+    
     // ---------------------------------------------------------------
     // Periodi derivati SOLO dal periodo naturale (no H-based scaling)
     // Struttura multi-scala: frazioni/multipli del ciclo osservato
@@ -4331,12 +4610,12 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     //  Periodi organici - TUTTI derivati dal periodo naturale e H
     // Minimi statistici da bootstrapMinBars (non arbitrari):
     int bs = GetBootstrapMinBars();
-    int veryFast = (int)MathMax(bs / 4, MathRound(base / 4.0));
-    int fast     = (int)MathMax(bs / 3, MathRound(base / 2.0));
-    int medium   = (int)MathMax(bs / 3, MathRound(base));
-    int slow     = (int)MathMax(bs / 2, MathRound(base * 2.0));
-    int verySlow = (int)MathMax(bs,     MathRound(base * 4.0));
-    int longest  = (int)MathMax(bs * 2, MathRound(base * 8.0));
+    int veryFast = (int)MathMin(maxPeriodSafe, MathMax(bs / 4, MathRound(base / 4.0)));
+    int fast     = (int)MathMin(maxPeriodSafe, MathMax(bs / 3, MathRound(base / 2.0)));
+    int medium   = (int)MathMin(maxPeriodSafe, MathMax(bs / 3, MathRound(base)));
+    int slow     = (int)MathMin(maxPeriodSafe, MathMax(bs / 2, MathRound(base * 2.0)));
+    int verySlow = (int)MathMin(maxPeriodSafe, MathMax(bs,     MathRound(base * 4.0)));
+    int longest  = (int)MathMin(maxPeriodSafe, MathMax(bs * 2, MathRound(base * 8.0)));
     
     if (g_enableLogsEffective) {
         PrintFormat("[ORGANIC] TF %s: Natural=%d -> VeryFast=%d Fast=%d Medium=%d Slow=%d VerySlow=%d Longest=%d",
@@ -4396,16 +4675,18 @@ void CalculateOrganicPeriodsFromData(ENUM_TIMEFRAMES tf, OrganicPeriods &organic
     
     // organic.weight gi assegnato all'inizio della funzione
     
-    //  Barre minime = periodo pi lungo usato  scale + margin
+    //  Barre minime = periodo pi lungo usato + margin
     // Calcolato dinamicamente in base ai periodi effettivi
-    organic.min_bars_required = longest + GetBufferLarge();
+    // FIX: Limita anche questo al numero di barre disponibili
+    int minBarsCalc = longest + GetBufferLarge();
+    organic.min_bars_required = (int)MathMin(maxPeriodSafe, minBarsCalc);
     
     //  Salva il periodo naturale per uso nelle scale
     organic.naturalPeriod = naturalPeriod;
 }
 
 //+------------------------------------------------------------------+
-//|  Log dei periodi organici calcolati                            |
+//|  Log dei periodi organici calcolati                              |
 //+------------------------------------------------------------------+
 void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 {
@@ -4424,8 +4705,8 @@ void LogOrganicPeriods(string tfName, OrganicPeriods &organic)
 }
 
 //+------------------------------------------------------------------+
-//|  FIX: Verifica se i periodi sono cambiati significativamente    |
-//| Ritorna true se almeno un periodo e' cambiato oltre soglia      |
+//|  FIX: Verifica se i periodi sono cambiati significativamente      |
+//| Ritorna true se almeno un periodo e' cambiato oltre soglia        |
 //| In tal caso gli handle indicatori devono essere ricreati          |
 //+------------------------------------------------------------------+
 bool PeriodsChangedSignificantly()
@@ -5278,6 +5559,18 @@ bool UpdateLastBar(ENUM_TIMEFRAMES tf, TimeFrameData &data)
     
     int count = ArraySize(data.rates);
     int lastIdx = count - 1;
+    
+    //  FIX CRITICO: Verifica che tutti gli array abbiano la stessa dimensione
+    // Se un array e' piu' piccolo, forza reload completo
+    if (ArraySize(data.ichimoku_tenkan) < count || ArraySize(data.ichimoku_kijun) < count ||
+        ArraySize(data.ichimoku_senkou_a) < count || ArraySize(data.ichimoku_senkou_b) < count ||
+        ArraySize(data.ema) < count || ArraySize(data.macd) < count || ArraySize(data.psar) < count ||
+        ArraySize(data.sma_fast) < count || ArraySize(data.sma_slow) < count ||
+        ArraySize(data.bb_upper) < count || ArraySize(data.atr) < count || ArraySize(data.adx) < count ||
+        ArraySize(data.rsi) < count || ArraySize(data.stoch_main) < count || ArraySize(data.obv) < count) {
+        data.lastUpdateFailCode = 4; // arraySizeMismatch
+        return false;
+    }
 
     // Rolling window: shift a sinistra di 1 e append della nuova barra chiusa (shift=1)
     // Questo mantiene coerenti i lookback (percentili/media/stddev) senza reload completi frequenti.
@@ -5408,6 +5701,23 @@ bool UpdateLastBar(ENUM_TIMEFRAMES tf, TimeFrameData &data)
     }
     CalculateOrganicValues(data, count, minBarsRequired);
     
+    // LOG DIAGNOSTICO: Rolling window attivo (performance ottimale)
+    if (g_enableLogsEffective) {
+        static datetime lastLogTime = 0;
+        static int rollingCount = 0;
+        rollingCount++;
+        
+        // Log throttled: solo ogni 100 rolling o ogni 5 minuti
+        if (rollingCount % 100 == 1 || TimeCurrent() - lastLogTime > 300) {
+            PrintFormat("[ROLLING] %s: shift %d barre, append 1 nuova (last=%.5f) | count=%d",
+                EnumToString(tf), count-1, data.rates[lastIdx].close, rollingCount);
+            lastLogTime = TimeCurrent();
+        }
+    }
+    
+    // DIAGNOSTICA: Incrementa contatore ROLLING UPDATE (ottimizzazione attiva)
+    g_rollingUpdateCount++;
+    
     return true;
 }
 
@@ -5426,6 +5736,17 @@ bool LoadTimeFrameData(ENUM_TIMEFRAMES tf, TimeFrameData &data, int bars)
         PrintFormat("[ERROR] Impossibile caricare rates per TF %s", EnumToString(tf));
         return false;
     }
+    
+    // LOG DIAGNOSTICO: Reload completo (carica tutto lo storico)
+    if (g_enableLogsEffective) {
+        // Calcolo RAM approssimativo: ogni barra = ~20 indicatori × 8 bytes (double)
+        int ramKB = (copiedBars * 20 * 8) / 1024;
+        PrintFormat("[RELOAD FULL] %s: caricati %d barre (memoria: ~%d KB)",
+            EnumToString(tf), copiedBars, ramKB);
+    }
+    
+    // DIAGNOSTICA: Incrementa contatore RELOAD FULL (operazione costosa)
+    g_reloadFullCount++;
     
     // FIX: Non piu warning "dati parziali" - ora usiamo quello che c'e
     // Se servono N barre e ne abbiamo M < N, usiamo M (il sistema si adatta)
@@ -6063,6 +6384,30 @@ double CalculateSignalScore(TimeFrameData &data, string timeframe)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    // CONTROLLO MEMORIA PERIODICO: Verifica ogni 1000 tick per prevenire crash
+    // NOTA: Disabilitato in backtest perché TerminalInfoInteger non funziona correttamente
+    static int tickCounter = 0;
+    tickCounter++;
+    if (tickCounter % 1000 == 0 && !MQLInfoInteger(MQL_TESTER)) {  // Solo in trading reale
+        long memoryUsed = TerminalInfoInteger(TERMINAL_MEMORY_USED);
+        long memoryLimit = TerminalInfoInteger(TERMINAL_MEMORY_TOTAL);
+        long memoryAvailable = memoryLimit - memoryUsed;
+        
+        // Se meno di 50 MB disponibili, disabilita temporaneamente trading
+        if (memoryAvailable < 50 * 1024 * 1024) {
+            PrintFormat("? [MEMORY CRITICAL] Memoria critica: %d MB disponibili! Trading sospeso temporaneamente.",
+                memoryAvailable / (1024*1024));
+            Comment(StringFormat("MEMORIA CRITICA: %d MB disponibili\\nTrading sospeso", 
+                memoryAvailable / (1024*1024)));
+            return;  // Esci immediatamente da OnTick per risparmiare risorse
+        }
+        
+        // Reset commento se memoria tornata normale
+        if (tickCounter % 5000 == 0) {
+            Comment("");
+        }
+    }
+    
     // Aggiorna trailing stop per proteggere profitti
     UpdateTrailingStops();
     
@@ -6212,54 +6557,50 @@ void OnTick()
         g_tfDataRecalcCounter++;
     }
     
-    // ---------------------------------------------------------------
-    // barsToLoad = max(min_bars_required di tutti i TF) * scale(H) (buffer statistico)
-    // Usiamo il max tra tutti i periodi organici gia calcolati
-    // min_bars_required = longest period + buffer organico (calcolato in CalculateOrganicPeriods)
-    // ---------------------------------------------------------------=
-    int maxPeriodNeeded = MathMax(g_organic_M5.min_bars_required, 
-                          MathMax(g_organic_H1.min_bars_required,
-                          MathMax(g_organic_H4.min_bars_required, g_organic_D1.min_bars_required)));
-    // Buffer = periodo max + buffer empirico (no H-based scaling)
-    int barsToLoad = maxPeriodNeeded + GetBufferLarge();
-    // Minimo = GetBufferXLarge() barre (~48-68)
-    int minBarsOrganic = GetBufferXLarge();
-    barsToLoad = MathMax(barsToLoad, minBarsOrganic);
+    // ============================================================
+    // NUOVO APPROCCIO TIME-BASED WINDOW (risolve crash PC)
+    // Calcola barre da caricare PER OGNI TF usando finestre temporali
+    // derivate dal periodo naturale (auto-driven, memory-safe)
+    // ============================================================
+    int barsM5 = 0, barsH1 = 0, barsH4 = 0, barsD1 = 0;
     
-    //  USA TUTTE LE BARRE DISPONIBILI - no limiti artificiali
-    int barsAvailable = Bars(_Symbol, PERIOD_M5);
+    if (g_dataReady_M5) barsM5 = CalculateBarsToLoad(PERIOD_M5, g_organic_M5);
+    if (g_dataReady_H1 && EnableVote_H1) barsH1 = CalculateBarsToLoad(PERIOD_H1, g_organic_H1);
+    if (g_dataReady_H4 && EnableVote_H4) barsH4 = CalculateBarsToLoad(PERIOD_H4, g_organic_H4);
+    if (g_dataReady_D1 && EnableVote_D1) barsD1 = CalculateBarsToLoad(PERIOD_D1, g_organic_D1);
     
-    // Se servono pi barre di quelle disponibili, usa il massimo disponibile
-    if (barsToLoad > barsAvailable - 10) {
-        barsToLoad = barsAvailable - 10;  // Margine sicurezza per evitare boundary issues
+    // Log diagnostico (throttled per evitare spam)
+    static int lastBarsM5 = 0;
+    if (g_enableLogsEffective && barsM5 != lastBarsM5) {
+        int naturalMins = (g_naturalPeriod_Min > 0) ? g_naturalPeriod_Min * PeriodSeconds(PERIOD_M5) / 60 : 1440;
+        PrintFormat("[BARSLOAD] TIME-BASED: M5=%d H1=%d H4=%d D1=%d | window: natural=%dmin × 4 = %dmin",
+            barsM5, barsH1, barsH4, barsD1, naturalMins, naturalMins * 4);
+        lastBarsM5 = barsM5;
     }
-    
-    //  MINIMO GARANTITO: almeno 100 barre per analisi statistica significativa (se disponibili)
-    barsToLoad = MathMax(barsToLoad, MathMin(100, barsAvailable - 10));
     
     // USA CACHE O RICARICA
     bool m5Loaded = true, h1Loaded = true, h4Loaded = true, d1Loaded = true;
     
     if (shouldReloadTFData) {
         if (g_enableLogsEffective) {
-            PrintFormat("[DATA-PERF] TF RELOAD completo: motivo=%s | barsToLoad=%d",
+            PrintFormat("[DATA-PERF] TF RELOAD completo: motivo=%s | bars: M5=%d H1=%d H4=%d D1=%d",
                 (!g_tfDataCacheValid ? "cacheInvalid" : "interval"),
-                barsToLoad);
+                barsM5, barsH1, barsH4, barsD1);
         }
         // Ricarica completa: M5 sempre; TF superiori solo se abilitati
-        m5Loaded = LoadTimeFrameData(PERIOD_M5, tfData_M5, barsToLoad);
-        h1Loaded = (!EnableVote_H1) ? true : LoadTimeFrameData(PERIOD_H1, tfData_H1, barsToLoad);
-        h4Loaded = (!EnableVote_H4) ? true : LoadTimeFrameData(PERIOD_H4, tfData_H4, barsToLoad);
-        d1Loaded = (!EnableVote_D1) ? true : LoadTimeFrameData(PERIOD_D1, tfData_D1, barsToLoad);
+        // OGNI TF usa il proprio numero di barre calcolato (time-based window)
+        m5Loaded = LoadTimeFrameData(PERIOD_M5, tfData_M5, barsM5);
+        h1Loaded = (!EnableVote_H1) ? true : LoadTimeFrameData(PERIOD_H1, tfData_H1, barsH1);
+        h4Loaded = (!EnableVote_H4) ? true : LoadTimeFrameData(PERIOD_H4, tfData_H4, barsH4);
+        d1Loaded = (!EnableVote_D1) ? true : LoadTimeFrameData(PERIOD_D1, tfData_D1, barsD1);
         g_tfDataCacheValid = true;
         
         if (g_enableLogsEffective) {
-            PrintFormat("[DATA] Stato: M5=%s H1=%s H4=%s D1=%s | barsToLoad=%d (RELOAD)",
+            PrintFormat("[DATA] Stato: M5=%s H1=%s H4=%s D1=%s (RELOAD TIME-BASED)",
                 m5Loaded ? "?" : "?",
                 h1Loaded ? "?" : "?",
                 h4Loaded ? "?" : "?",
-                d1Loaded ? "?" : "?",
-                barsToLoad);
+                d1Loaded ? "?" : "?");
         }
     } else {
         //  USA CACHE - Aggiorna SOLO se il TF ha una nuova barra CHIUSA
@@ -6278,6 +6619,12 @@ void OnTick()
         h1Loaded = (!EnableVote_H1) ? true : (h1NeedsUpdate ? UpdateLastBar(PERIOD_H1, tfData_H1) : true);
         h4Loaded = (!EnableVote_H4) ? true : (h4NeedsUpdate ? UpdateLastBar(PERIOD_H4, tfData_H4) : true);
         d1Loaded = (!EnableVote_D1) ? true : (d1NeedsUpdate ? UpdateLastBar(PERIOD_D1, tfData_D1) : true);
+        
+        // DIAGNOSTICA: Conta CACHE HIT (nessuna nuova barra = skip update)
+        if (!m5NeedsUpdate) g_cacheHitCount++;
+        if (EnableVote_H1 && !h1NeedsUpdate) g_cacheHitCount++;
+        if (EnableVote_H4 && !h4NeedsUpdate) g_cacheHitCount++;
+        if (EnableVote_D1 && !d1NeedsUpdate) g_cacheHitCount++;
 
         if (g_enableLogsEffective) {
             string m5Str = m5NeedsUpdate ? (m5Loaded ? "ROLL" : "FAIL") : "SKIP(noNewBar)";
@@ -6286,6 +6633,18 @@ void OnTick()
             string d1Str = (!EnableVote_D1) ? "SKIP(disabled)" : (d1NeedsUpdate ? (d1Loaded ? "ROLL" : "FAIL") : "SKIP(noNewBar)");
             PrintFormat("[DATA-PERF] TF update: M5=%s H1=%s H4=%s D1=%s | cacheCounter=%d/%d",
                 m5Str, h1Str, h4Str, d1Str, g_tfDataRecalcCounter, tfDataReloadInterval);
+            
+            // LOG RIEPILOGO PERFORMANCE (ogni 1000 operazioni)
+            static int lastReportOps = 0;
+            int totalOps = g_rollingUpdateCount + g_reloadFullCount + g_cacheHitCount;
+            if (totalOps > 0 && (totalOps - lastReportOps >= 1000 || totalOps % 500 == 100)) {
+                double rollingPct = (g_rollingUpdateCount * 100.0) / totalOps;
+                double reloadPct = (g_reloadFullCount * 100.0) / totalOps;
+                double cachePct = (g_cacheHitCount * 100.0) / totalOps;
+                PrintFormat("[PERF REPORT] Total ops=%d | ROLLING=%d (%.1f%%) | RELOAD=%d (%.1f%%) | CACHE_HIT=%d (%.1f%%)",
+                    totalOps, g_rollingUpdateCount, rollingPct, g_reloadFullCount, reloadPct, g_cacheHitCount, cachePct);
+                lastReportOps = totalOps;
+            }
         }
         
         //  FIX: Se update cache fallisce, forza reload SOLO del TF fallito per recuperare
@@ -6321,10 +6680,11 @@ void OnTick()
             }
 
             // Forza reload per ripristinare isDataReady (solo TF necessari)
-            if (!m5Loaded) m5Loaded = LoadTimeFrameData(PERIOD_M5, tfData_M5, barsToLoad);
-            if (EnableVote_H1 && !h1Loaded) h1Loaded = LoadTimeFrameData(PERIOD_H1, tfData_H1, barsToLoad);
-            if (EnableVote_H4 && !h4Loaded) h4Loaded = LoadTimeFrameData(PERIOD_H4, tfData_H4, barsToLoad);
-            if (EnableVote_D1 && !d1Loaded) d1Loaded = LoadTimeFrameData(PERIOD_D1, tfData_D1, barsToLoad);
+            // USA TIME-BASED WINDOW: ogni TF ha il proprio numero di barre
+            if (!m5Loaded) m5Loaded = LoadTimeFrameData(PERIOD_M5, tfData_M5, barsM5);
+            if (EnableVote_H1 && !h1Loaded) h1Loaded = LoadTimeFrameData(PERIOD_H1, tfData_H1, barsH1);
+            if (EnableVote_H4 && !h4Loaded) h4Loaded = LoadTimeFrameData(PERIOD_H4, tfData_H4, barsH4);
+            if (EnableVote_D1 && !d1Loaded) d1Loaded = LoadTimeFrameData(PERIOD_D1, tfData_D1, barsD1);
         }
         
         if (g_enableLogsEffective) {
@@ -7304,7 +7664,8 @@ int ExecuteVotingLogic()
     }
     
     // STEP 2: Score DEBOLE ma REVERSAL FORTE nella stessa direzione - entry anticipato
-    if (decision == 0 && reversalSignal != 0 && reversalStrength >= g_reversalThreshold) {
+    // Nota: se vuoi che la soglia manuale sia "rigida", disattiva EnableEarlyEntryBelowThreshold.
+    if (EnableEarlyEntryBelowThreshold && decision == 0 && reversalSignal != 0 && reversalStrength >= g_reversalThreshold) {
         // Score deve essere almeno nella stessa direzione del reversal
         bool directionMatch = (reversalSignal == 1 && totalScore >= 0) || 
                               (reversalSignal == -1 && totalScore <= 0);
@@ -7460,7 +7821,21 @@ void OpenSellOrder()
     else if (SellTakeProfitPoints > 0)
         tp = price - SellTakeProfitPoints * _Point;
     
-    if (trade.Sell(finalLot, _Symbol, price, sl, tp, "Auto SELL")) {
+    // ---------------------------------------------------------------
+    // Normalizza e valida SL/TP rispetto ai vincoli broker
+    // ---------------------------------------------------------------
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    int stopsLevelPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStopDist = (stopsLevelPts > 0 ? stopsLevelPts * point : 0.0);
+    if (sl > 0) sl = NormalizeDouble(sl, digits);
+    if (tp > 0) tp = NormalizeDouble(tp, digits);
+    // SELL: SL sopra, TP sotto
+    if (sl > 0 && sl <= price + minStopDist) sl = NormalizeDouble(price + minStopDist, digits);
+    if (tp > 0 && tp >= price - minStopDist) tp = NormalizeDouble(price - minStopDist, digits);
+
+    // Market order: lascia che il server scelga il prezzo (piu' robusto di passare bid/ask)
+    if (trade.Sell(finalLot, _Symbol, 0.0, sl, tp, "Auto SELL")) {
         // CALCOLA SLIPPAGE
         double executedPrice = trade.ResultPrice();
         double slippagePoints = (bidBefore - executedPrice) / _Point;
@@ -7499,6 +7874,75 @@ void OpenSellOrder()
         }
 
         RegisterEntrySnapshot(snap);
+
+        // ---------------------------------------------------------------
+        // FIX: Applica SL/TP in modo deterministico dopo l'entry
+        // In alcuni ambienti (tester/broker) i livelli possono essere ignorati se troppo vicini.
+        // Qui li ricalcoliamo rispetto al prezzo di apertura effettivo e li impostiamo via SLTP.
+        // ---------------------------------------------------------------
+        if (positionId > 0 && (SellStopLossPoints > 0 || SellTakeProfitPoints > 0 || StopLossPriceSell > 0 || TakeProfitPriceSell > 0))
+        {
+            ulong positionTicket = 0;
+            if (TryGetPositionTicketByIdentifier(positionId, positionTicket) && PositionSelectByTicket(positionTicket))
+            {
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double desiredSL = 0.0;
+                double desiredTP = 0.0;
+
+                // Priorita': prezzo fisso (se >0), altrimenti punti relativi all'open effettivo
+                if (StopLossPriceSell > 0) desiredSL = StopLossPriceSell;
+                else if (SellStopLossPoints > 0) desiredSL = openPrice + SellStopLossPoints * point;
+
+                if (TakeProfitPriceSell > 0) desiredTP = TakeProfitPriceSell;
+                else if (SellTakeProfitPoints > 0) desiredTP = openPrice - SellTakeProfitPoints * point;
+
+                if (desiredSL > 0) desiredSL = NormalizeDouble(desiredSL, digits);
+                if (desiredTP > 0) desiredTP = NormalizeDouble(desiredTP, digits);
+
+                // Rispetta stop level
+                if (desiredSL > 0 && desiredSL <= openPrice + minStopDist) desiredSL = NormalizeDouble(openPrice + minStopDist, digits);
+                if (desiredTP > 0 && desiredTP >= openPrice - minStopDist) desiredTP = NormalizeDouble(openPrice - minStopDist, digits);
+
+                double curSL = PositionGetDouble(POSITION_SL);
+                double curTP = PositionGetDouble(POSITION_TP);
+                bool needSL = (desiredSL > 0 && (curSL <= 0 || MathAbs(curSL - desiredSL) > point * 0.5));
+                bool needTP = (desiredTP > 0 && (curTP <= 0 || MathAbs(curTP - desiredTP) > point * 0.5));
+
+                if (needSL || needTP)
+                {
+                    MqlTradeRequest req;
+                    MqlTradeResult res;
+                    ZeroMemory(req);
+                    ZeroMemory(res);
+                    req.action = TRADE_ACTION_SLTP;
+                    req.symbol = _Symbol;
+                    req.position = positionTicket;
+                    req.magic = g_uniqueMagicNumber;
+                    req.sl = (desiredSL > 0 ? desiredSL : curSL);
+                    req.tp = (desiredTP > 0 ? desiredTP : curTP);
+                    if (!OrderSend(req, res))
+                    {
+                        if (g_enableLogsEffective)
+                            PrintFormat("[TRADE] WARN: SLTP post-entry fallito (SELL) posId=%I64u ticket=%I64u err=%d", positionId, positionTicket, GetLastError());
+                    }
+                    else
+                    {
+                        if (g_enableLogsEffective)
+                        {
+                            double newSL = PositionGetDouble(POSITION_SL);
+                            double newTP = PositionGetDouble(POSITION_TP);
+                            PrintFormat("[TRADE] SLTP post-entry applicato (SELL) posId=%I64u ticket=%I64u SL=%.5f TP=%.5f (posSL=%.5f posTP=%.5f)",
+                                positionId, positionTicket, req.sl, req.tp, newSL, newTP);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (g_enableLogsEffective)
+                    PrintFormat("[TRADE] WARN: impossibile selezionare posizione per SLTP post-entry (SELL) posId=%I64u", positionId);
+            }
+        }
         
         // Aggiorna statistiche
         g_stats.totalSlippage += MathAbs(slippagePoints);
@@ -7599,7 +8043,21 @@ void OpenBuyOrder()
     else if (BuyTakeProfitPoints > 0)
         tp = price + BuyTakeProfitPoints * _Point;
     
-    if (trade.Buy(finalLot, _Symbol, price, sl, tp, "Auto BUY")) {
+    // ---------------------------------------------------------------
+    // Normalizza e valida SL/TP rispetto ai vincoli broker
+    // ---------------------------------------------------------------
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    int stopsLevelPts = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStopDist = (stopsLevelPts > 0 ? stopsLevelPts * point : 0.0);
+    if (sl > 0) sl = NormalizeDouble(sl, digits);
+    if (tp > 0) tp = NormalizeDouble(tp, digits);
+    // BUY: SL sotto, TP sopra
+    if (sl > 0 && sl >= price - minStopDist) sl = NormalizeDouble(price - minStopDist, digits);
+    if (tp > 0 && tp <= price + minStopDist) tp = NormalizeDouble(price + minStopDist, digits);
+
+    // Market order: lascia che il server scelga il prezzo (piu' robusto di passare bid/ask)
+    if (trade.Buy(finalLot, _Symbol, 0.0, sl, tp, "Auto BUY")) {
         // CALCOLA SLIPPAGE
         double executedPrice = trade.ResultPrice();
         double slippagePoints = (executedPrice - askBefore) / _Point;
@@ -7637,6 +8095,74 @@ void OpenBuyOrder()
         }
 
         RegisterEntrySnapshot(snap);
+
+        // ---------------------------------------------------------------
+        // FIX: Applica SL/TP in modo deterministico dopo l'entry
+        // Ricalcola su prezzo di apertura effettivo per rispettare esattamente i "points".
+        // ---------------------------------------------------------------
+        if (positionId > 0 && (BuyStopLossPoints > 0 || BuyTakeProfitPoints > 0 || StopLossPriceBuy > 0 || TakeProfitPriceBuy > 0))
+        {
+            ulong positionTicket = 0;
+            if (TryGetPositionTicketByIdentifier(positionId, positionTicket) && PositionSelectByTicket(positionTicket))
+            {
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double desiredSL = 0.0;
+                double desiredTP = 0.0;
+
+                // Priorita': prezzo fisso (se >0), altrimenti punti relativi all'open effettivo
+                if (StopLossPriceBuy > 0) desiredSL = StopLossPriceBuy;
+                else if (BuyStopLossPoints > 0) desiredSL = openPrice - BuyStopLossPoints * point;
+
+                if (TakeProfitPriceBuy > 0) desiredTP = TakeProfitPriceBuy;
+                else if (BuyTakeProfitPoints > 0) desiredTP = openPrice + BuyTakeProfitPoints * point;
+
+                if (desiredSL > 0) desiredSL = NormalizeDouble(desiredSL, digits);
+                if (desiredTP > 0) desiredTP = NormalizeDouble(desiredTP, digits);
+
+                // Rispetta stop level
+                if (desiredSL > 0 && desiredSL >= openPrice - minStopDist) desiredSL = NormalizeDouble(openPrice - minStopDist, digits);
+                if (desiredTP > 0 && desiredTP <= openPrice + minStopDist) desiredTP = NormalizeDouble(openPrice + minStopDist, digits);
+
+                double curSL = PositionGetDouble(POSITION_SL);
+                double curTP = PositionGetDouble(POSITION_TP);
+                bool needSL = (desiredSL > 0 && (curSL <= 0 || MathAbs(curSL - desiredSL) > point * 0.5));
+                bool needTP = (desiredTP > 0 && (curTP <= 0 || MathAbs(curTP - desiredTP) > point * 0.5));
+
+                if (needSL || needTP)
+                {
+                    MqlTradeRequest req;
+                    MqlTradeResult res;
+                    ZeroMemory(req);
+                    ZeroMemory(res);
+                    req.action = TRADE_ACTION_SLTP;
+                    req.symbol = _Symbol;
+                    req.position = positionTicket;
+                    req.magic = g_uniqueMagicNumber;
+                    req.sl = (desiredSL > 0 ? desiredSL : curSL);
+                    req.tp = (desiredTP > 0 ? desiredTP : curTP);
+                    if (!OrderSend(req, res))
+                    {
+                        if (g_enableLogsEffective)
+                            PrintFormat("[TRADE] WARN: SLTP post-entry fallito (BUY) posId=%I64u ticket=%I64u err=%d", positionId, positionTicket, GetLastError());
+                    }
+                    else
+                    {
+                        if (g_enableLogsEffective)
+                        {
+                            double newSL = PositionGetDouble(POSITION_SL);
+                            double newTP = PositionGetDouble(POSITION_TP);
+                            PrintFormat("[TRADE] SLTP post-entry applicato (BUY) posId=%I64u ticket=%I64u SL=%.5f TP=%.5f (posSL=%.5f posTP=%.5f)",
+                                positionId, positionTicket, req.sl, req.tp, newSL, newTP);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (g_enableLogsEffective)
+                    PrintFormat("[TRADE] WARN: impossibile selezionare posizione per SLTP post-entry (BUY) posId=%I64u", positionId);
+            }
+        }
         
         // Aggiorna statistiche
         g_stats.totalSlippage += MathAbs(slippagePoints);
@@ -7749,15 +8275,27 @@ void UpdateTrailingStops()
             if (newSL >= openPrice) continue; // Non mettere SL sopra breakeven
         }
         
-        // Modifica posizione con nuovo SL
-        if (trade.PositionModify(ticket, newSL, currentTP)) {
+        // Modifica posizione con nuovo SL (usa SLTP su ticket posizione per compatibilita' hedging)
+        {
+            MqlTradeRequest req;
+            MqlTradeResult res;
+            ZeroMemory(req);
+            ZeroMemory(res);
+            req.action = TRADE_ACTION_SLTP;
+            req.symbol = _Symbol;
+            req.position = ticket;
+            req.magic = uniqueMagic;
+            req.sl = newSL;
+            req.tp = currentTP;
+            if (OrderSend(req, res)) {
             PrintFormat("[TRAILING] Aggiornato SL posizione #%I64u %s | Profit: %.0f points | Nuovo SL: %.5f (step %d points)",
                 ticket, type == POSITION_TYPE_BUY ? "BUY" : "SELL", 
                 profitPoints, newSL, trailingStep);
-        } else {
+            } else {
             int errCode = GetLastError();
             // Log errore solo se non  "no changes" (codice 10025)
             if (errCode != 10025) {
+            }
                 PrintFormat("[TRAILING] WARN: errore modifica SL #%I64u: %d - %s",
                     ticket, errCode, ErrorDescription(errCode));
             }
@@ -7771,8 +8309,18 @@ void UpdateTrailingStops()
 //+------------------------------------------------------------------+
 void CheckEarlyExitOnReversal()
 {
+    if (!EnableEarlyExitOnReversal) return;
     int totalPositions = PositionsTotal();
     if (totalPositions == 0) return;
+
+    // Valuta una sola volta per barra M5 (default), per evitare close su rumore intra-bar.
+    static datetime s_lastM5BarTime = 0;
+    if (EarlyExitCheckOnNewM5BarOnly) {
+        datetime bt = iTime(_Symbol, PERIOD_M5, 0);
+        if (bt <= 0) return;
+        if (bt == s_lastM5BarTime) return;
+        s_lastM5BarTime = bt;
+    }
     
     int uniqueMagic = g_uniqueMagicNumber;
     double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -7780,9 +8328,37 @@ void CheckEarlyExitOnReversal()
     // Ottieni segnali mean-reversion correnti
     double reversalStrength = 0.0;
     int reversalSignal = GetReversalSignal(reversalStrength, false);
-    
-    // Exit solo se segnale reversal FORTE (sopra soglia data-driven)
-    if (reversalSignal == 0 || reversalStrength < g_reversalThreshold) return;
+
+    // Soglia reversal: AUTO (data-driven) o manuale
+    double reversalThr = g_reversalThreshold;
+    if (EarlyExitReversalStrengthOverride > 0.0) reversalThr = EarlyExitReversalStrengthOverride;
+
+    // Richiedi conferma su N barre (default 2) per ridurre chiusure affrettate.
+    // FIX: se il reversal sparisce o scende sotto soglia, resettiamo la conferma.
+    static int s_confirmCount = 0;
+    static int s_lastSignal = 0;
+    int needBars = MathMax(1, EarlyExitConfirmBars);
+    if (reversalSignal == 0 || reversalStrength < reversalThr) {
+        s_confirmCount = 0;
+        s_lastSignal = 0;
+        return;
+    }
+
+    if (reversalSignal == s_lastSignal) s_confirmCount++;
+    else {
+        s_lastSignal = reversalSignal;
+        s_confirmCount = 1;
+    }
+    if (s_confirmCount < needBars) {
+        if (g_enableLogsEffective) {
+            PrintFormat("[EARLY EXIT] Reversal OK ma in attesa conferma: sig=%s forza=%.0f%% thr=%.0f%% (%d/%d)",
+                reversalSignal > 0 ? "BUY" : "SELL",
+                reversalStrength * 100.0,
+                reversalThr * 100.0,
+                s_confirmCount, needBars);
+        }
+        return;
+    }
     
     for (int i = totalPositions - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
@@ -7793,6 +8369,12 @@ void CheckEarlyExitOnReversal()
         ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
         double profitPL = PositionGetDouble(POSITION_PROFIT);
+
+        if (EarlyExitMinPositionAgeMinutes > 0) {
+            datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+            int ageMinutes = (int)((TimeCurrent() - openTime) / 60);
+            if (ageMinutes < EarlyExitMinPositionAgeMinutes) continue;
+        }
         
         // Chiudi solo posizioni in PERDITA
         if (profitPL >= 0) continue;
@@ -7830,12 +8412,18 @@ void CheckEarlyExitOnReversal()
             atrPips = g_lastCacheATR / point / 10.0;
         }
         if (atrPips <= 0.0) atrPips = EarlyExitAtrPipsFallback;
-        double minLossThreshold = MathMax(EarlyExitMinLossPipsFloor, EarlyExitMinLossAtrFrac * atrPips);
+        double lossFloor = (EarlyExitMinLossPipsOverride > 0.0 ? EarlyExitMinLossPipsOverride : EarlyExitMinLossPipsFloor);
+        double atrFrac = (EarlyExitMinLossAtrFracOverride > 0.0 ? EarlyExitMinLossAtrFracOverride : EarlyExitMinLossAtrFrac);
+        double minLossThreshold = MathMax(lossFloor, atrFrac * atrPips);
         if (shouldClose && lossPips > minLossThreshold) {
             if (trade.PositionClose(ticket)) {
                 PrintFormat("[EARLY EXIT] Chiusa posizione #%I64u %s | Loss: %.1f pips (%.2f EUR) | Motivo: %s (forza %.0f%%)",
                     ticket, type == POSITION_TYPE_BUY ? "BUY" : "SELL",
                     lossPips, profitPL, closeReason, reversalStrength * 100);
+                if (g_enableLogsEffective) {
+                    PrintFormat("[EARLY EXIT] Dettagli: conf=%d/%d thrRev=%.0f%% lossThr=%.2f pips (floor=%.2f atr=%.2f atrFrac=%.3f)",
+                        s_confirmCount, needBars, reversalThr * 100.0, minLossThreshold, lossFloor, atrPips, atrFrac);
+                }
             } else {
                 PrintFormat("[EARLY EXIT] WARN: errore chiusura #%I64u: %d", ticket, GetLastError());
             }
